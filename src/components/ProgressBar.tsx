@@ -8,16 +8,16 @@ export function ProgressBar({ raised, target }: Props) {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex justify-between text-xs text-[var(--muted)]">
-        <span>${fmt(raised)} raised</span>
-        <span>${fmt(target)} target</span>
+        <span>{fmt(raised)} USDC raised</span>
+        <span>{fmt(target)} USDC target</span>
       </div>
-      <div className="h-2 rounded-full bg-[var(--surface-muted)] overflow-hidden">
+      <div className="h-3 rounded-full bg-[var(--surface-muted)] overflow-hidden">
         <div
           className="h-full rounded-full bg-[var(--accent)] transition-all duration-500"
           style={{ width: `${pct}%` }}
         />
       </div>
-      <p className="text-xs text-[var(--subtle)] text-right">{pct.toFixed(1)}% funded</p>
+      <p className="text-xs text-[var(--subtle)] text-right tabular-nums">{pct.toFixed(1)}% funded</p>
     </div>
   )
 }

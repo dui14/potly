@@ -6,6 +6,7 @@ import { IS_TESTNET } from '@/config/wagmi'
 import { useMyAlias } from '@/hooks/useAlias'
 import { supabaseAvailable } from '@/lib/supabase'
 import { AliasModal } from './AliasModal'
+import { EditAliasModal } from './EditAliasModal'
 
 export function Header() {
   const { pathname } = useLocation()
@@ -75,7 +76,7 @@ export function Header() {
               <button
                 onClick={() => setShowModal(true)}
                 className="text-xs text-[var(--muted)] hover:text-[var(--ink)] transition"
-                title="Your alias"
+                title="Edit alias"
               >
                 @{alias}
               </button>
@@ -93,11 +94,19 @@ export function Header() {
         </div>
       </header>
 
-      {showModal && address && (
+      {showModal && address && !alias && (
         <AliasModal
           address={address}
           onClose={() => setShowModal(false)}
           onClaimed={(_a) => { setShowModal(false); refetch() }}
+        />
+      )}
+      {showModal && address && alias && (
+        <EditAliasModal
+          address={address}
+          currentAlias={alias}
+          onClose={() => setShowModal(false)}
+          onUpdated={(_a) => { setShowModal(false); refetch() }}
         />
       )}
     </>

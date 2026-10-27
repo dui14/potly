@@ -5,8 +5,8 @@ import { ExternalLink, Loader2 } from 'lucide-react'
 import { useMyPots } from '@/hooks/useMyPots'
 import { usePot } from '@/hooks/usePot'
 import { StatusBadge } from '@/components/StatusBadge'
-import { loadMeta } from '@/lib/metadata'
 import { TARGET_CHAIN_ID } from '@/config/wagmi'
+import { usePotMeta } from '@/hooks/usePotMeta'
 
 export function MyPotsPage() {
   const { address } = useAccount()
@@ -62,8 +62,7 @@ export function MyPotsPage() {
 
 function PotCard({ potId, role }: { potId: bigint; role: string }) {
   const { pot } = usePot(potId)
-  const meta = loadMeta(TARGET_CHAIN_ID, potId)
-  const title = meta?.title || `Pot #${potId}`
+  const { title } = usePotMeta(TARGET_CHAIN_ID, potId)
 
   return (
     <Link
@@ -82,8 +81,8 @@ function PotCard({ potId, role }: { potId: bigint; role: string }) {
       </div>
       {pot && (
         <div className="mt-3 flex gap-4 text-xs text-[var(--muted)] tabular-nums">
-          <span>Target ${fmt(pot.target)} · {pot.slots.toString()} slots</span>
-          <span>{pot.contributors.toString()} contributor{pot.contributors !== 1n ? 's' : ''}</span>
+          <span>Target {fmt(pot.target)} USDC</span>
+          <span>Contributor spots {pot.contributors.toString()}/{pot.slots.toString()}</span>
         </div>
       )}
     </Link>

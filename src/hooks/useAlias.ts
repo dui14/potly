@@ -70,6 +70,27 @@ export function useAliasAvailability(alias: string) {
   return { available, checking }
 }
 
+/** PUT to /api/v1/profile/update. Returns error string or null on success. */
+export async function updateAlias(
+  oldAlias: string,
+  newAlias: string,
+  address: string,
+  signMessage: (msg: string) => Promise<string>,
+): Promise<string | null> {
+  const issuedAt = new Date().toISOString()
+  const message  = `Potly alias update\nOld: ${oldAlias.toLowerCase()}\nNew: ${newAlias.toLowerCase()}\nWallet: ${address}\nIssued: ${issuedAt}`
+  let signature: string
+  try { signature = await signMessage(message) } catch { return 'Signature cancelled.' }
+  const res = await fetch('/api/v1/profile/update', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ oldAlias, newAlias, address, issuedAt, signature }),
+  })
+  if (res.ok) return null
+  const body = await res.json().catch(() => ({})) as { error?: string }
+  return body.error ?? `Server error ${res.status}`
+}
+
 /** POST to /api/v1/profile. Returns error string or null on success. */
 export async function claimAlias(
   alias: string,

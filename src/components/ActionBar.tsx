@@ -17,9 +17,13 @@ interface Props {
   pot: PotData
   chainTime: bigint
   onAction: () => void
+  syncTx?: (txHash: string) => void
+  mobileCompact?: boolean
 }
 
-export function ActionBar({ potId, pot, chainTime, onAction }: Props) {
+export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompact }: Props) {
+  void mobileCompact  // reserved for future mobile-only condensed view
+
   const { address, chainId } = useAccount()
   const { switchChain }      = useSwitchChain()
   const { writeContractAsync } = useWriteContract()
@@ -90,6 +94,7 @@ export function ActionBar({ potId, pot, chainTime, onAction }: Props) {
                 })
               }}
               onSuccess={onAction}
+              onReceipt={syncTx ? (r) => syncTx(r.transactionHash) : undefined}
             />
           </div>
         )}
@@ -119,6 +124,7 @@ export function ActionBar({ potId, pot, chainTime, onAction }: Props) {
             })
           }}
           onSuccess={onAction}
+          onReceipt={syncTx ? (r) => syncTx(r.transactionHash) : undefined}
         />
         {contribution > 0n && isRefundable && (
           <div className="border-t border-[var(--border)] pt-4">

@@ -15,9 +15,15 @@ import { TxButton } from './TxButton'
 
 const DURATION_PRESETS = [
   { label: '5 min',  value: 5 * 60 },
+  { label: '15 min', value: 15 * 60 },
+  { label: '1 hr',   value: 3_600 },
   { label: '1 day',  value: 86_400 },
   { label: '7 days', value: 7 * 86_400 },
+  { label: 'Custom', value: -1 },
 ]
+
+const MIN_DURATION = 60          // 1 minute
+const MAX_DURATION = 30 * 86_400 // 30 days
 
 export function CreatePotForm() {
   const { address, chainId } = useAccount()
@@ -28,8 +34,10 @@ export function CreatePotForm() {
   const [recipientRaw, setRecipientRaw] = useState('')
   const [confirmed, setConfirmed]       = useState(false)
   const [targetStr, setTargetStr]       = useState('10')
-  const [slots, setSlots]               = useState(3)
+  const [slots, setSlots]               = useState(10)
   const [duration, setDuration]         = useState(86_400)
+  const [customDuration, setCustomDuration] = useState('')
+  const [showCustom, setShowCustom]     = useState(false)
   const [title, setTitle]               = useState('')
   const [note, setNote]                 = useState('')
   const [error, setError]               = useState('')
@@ -148,32 +156,63 @@ export function CreatePotForm() {
         )}
       </div>
 
-      {/* Slots */}
+      {/* Duration */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-sm font-medium text-[var(--ink-2)]">Duration</label>
+        <div className="flex flex-wrap gap-2">
+          {DURATION_PRESETS.map(p => {
+            const isCustom = p.value === -1
+            const isActive = isCustom ? showCustom : (!showCustom && duration === p.value)
+            return (
+              <button
+                key={p.value}
+                onClick={() => {
+                  if (isCustom) { setShowCustom(true) }
+                  else { setShowCustom(false); setDuration(p.value) }
+                }}
+                className={`px-3 py-2 rounded-xl text-sm font-medium border transition ${isActive ? 'bg-[var(--accent)] text-white border-transparent' : 'bg-[var(--surface)] border-[var(--border)] text-[var(--ink-2)] hover:border-[var(--border-strong)]'}`}
+              >{p.label}</button>
+            )
+          })}
+        </div>
+        {showCustom && (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                max={30 * 24 * 60}
+                value={customDuration}
+                onChange={e => {
+                  setCustomDuration(e.target.value)
+                  const mins = Number(e.target.value)
+                  if (mins >= 1 && mins <= 30 * 24 * 60) setDuration(mins * 60)
+                }}
+                placeholder="minutes (1–43200)"
+                className="flex-1 bg-[var(--surface-muted)] border border-[var(--border)] rounded-xl px-3 py-2 text-sm outline-none"
+              />
+              <span className="text-xs text-[var(--muted)] whitespace-nowrap">min</span>
+            </div>
+            {customDuration && (Number(customDuration) * 60 < MIN_DURATION || Number(customDuration) * 60 > MAX_DURATION) && (
+              <p className="text-xs text-[var(--danger)]">Between 1 minute and 30 days</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Slots hint */}
       <div className="flex flex-col gap-1.5">
         <label className="text-sm font-medium text-[var(--ink-2)]">
           Max contributors — {slots}
-          {suggestedShare > 0n && <span className="text-[var(--subtle)] font-normal"> · suggested ${formatUsdc(suggestedShare)} each</span>}
+          {suggestedShare > 0n && <span className="text-[var(--subtle)] font-normal"> · suggested {formatUsdc(suggestedShare)} USDC each</span>}
         </label>
+        <p className="text-xs text-[var(--subtle)]">New wallets need a free slot; wallets already in can add more.</p>
         <input
           type="range" min={1} max={100} value={slots}
           onChange={e => setSlots(Number(e.target.value))}
           className="w-full"
         />
         <div className="flex justify-between text-xs text-[var(--subtle)]"><span>1</span><span>100</span></div>
-      </div>
-
-      {/* Duration */}
-      <div className="flex flex-col gap-1.5">
-        <label className="text-sm font-medium text-[var(--ink-2)]">Duration</label>
-        <div className="flex gap-2">
-          {DURATION_PRESETS.map(p => (
-            <button
-              key={p.value}
-              onClick={() => setDuration(p.value)}
-              className={`flex-1 px-3 py-2 rounded-xl text-sm font-medium border transition ${duration === p.value ? 'bg-[var(--accent)] text-white border-transparent' : 'bg-[var(--surface)] border-[var(--border)] text-[var(--ink-2)] hover:border-[var(--border-strong)]'}`}
-            >{p.label}</button>
-          ))}
-        </div>
       </div>
 
       {/* Title */}
@@ -201,10 +240,10 @@ export function CreatePotForm() {
 
       {/* Summary */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] p-4 flex flex-col gap-2 text-sm">
-        <Row label="Target"           value={`$${formatUsdc(targetRaw)} USDC`} strong />
-        <Row label="Suggested share"  value={suggestedShare > 0n ? `$${formatUsdc(suggestedShare)} USDC` : '—'} />
+        <Row label="Target"           value={`${formatUsdc(targetRaw)} USDC`} strong />
+        <Row label="Suggested share"  value={suggestedShare > 0n ? `${formatUsdc(suggestedShare)} USDC each` : '—'} />
         <Row label="Protocol fee"     value="0.05% only when paid out" />
-        <Row label="Est. gas"         value={`~$${formatUsdc(gasEst)} USDC`} />
+        <Row label="Est. gas"         value={`~${(Number(gasEst) / 1_000_000).toFixed(4)} USDC`} />
         {!IS_TESTNET && <Row label="" value="Real USDC — mainnet" danger />}
       </div>
 

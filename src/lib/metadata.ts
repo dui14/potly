@@ -43,3 +43,36 @@ export function parseUsdc(s: string): bigint {
   if (isNaN(n) || n < 0) throw new Error('Invalid amount')
   return BigInt(Math.round(n * 1_000_000))
 }
+
+/**
+ * POST metadata to the API with up to 3 retries and exponential backoff.
+ * Silently succeeds if the API is not configured (503) — localStorage is the fallback.
+ * Returns true on success, false on permanent failure.
+ */
+export async function postMetadata(
+  chainId: number,
+  potId: bigint,
+  meta: PotMeta,
+): Promise<boolean> {
+  const url = `/api/v1/pots/${chainId}/${potId}/metadata`
+  const body = JSON.stringify({ title: meta.title, note: meta.note, salt: meta.salt })
+  const MAX_TRIES = 3
+  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      })
+      if (res.ok) return true
+      // 503 = API not configured; 409 = already stored — both are acceptable
+      if (res.status === 503 || res.status === 409) return true
+      // 400 hash mismatch — no point retrying
+      if (res.status === 400) return false
+    } catch { /* network error — retry */ }
+    if (attempt < MAX_TRIES - 1) {
+      await new Promise(r => setTimeout(r, 500 * 2 ** attempt))
+    }
+  }
+  return false
+}

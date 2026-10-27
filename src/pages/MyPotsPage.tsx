@@ -10,7 +10,7 @@ import { TARGET_CHAIN_ID } from '@/config/wagmi'
 
 export function MyPotsPage() {
   const { address } = useAccount()
-  const { pots, loading, error, progress } = useMyPots(address)
+  const { pots, loading, error, progress, retry } = useMyPots(address)
 
   if (!address) {
     return (
@@ -33,15 +33,16 @@ export function MyPotsPage() {
           <Loader2 size={24} className="animate-spin" />
           {progress && (
             <p className="text-xs tabular-nums">
-              Scanning block {progress.current.toString()} / {progress.head.toString()}
+              Loading {progress.done}/{progress.total} pots…
             </p>
           )}
         </div>
       )}
 
       {error && (
-        <div className="rounded-xl border border-[var(--danger)]/40 bg-[var(--danger)]/10 p-4 text-sm text-[var(--danger)]">
-          {error}
+        <div className="rounded-xl border border-[var(--danger)]/40 bg-[var(--danger)]/10 p-4 text-sm text-[var(--danger)] flex items-center justify-between gap-3">
+          <span>{error}</span>
+          <button onClick={() => retry()} className="underline text-[var(--danger)] font-medium whitespace-nowrap">Retry</button>
         </div>
       )}
 

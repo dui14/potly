@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { useWaitForTransactionReceipt } from 'wagmi'
+import { useWaitForTransactionReceipt, type UseWaitForTransactionReceiptReturnType } from 'wagmi'
+type Receipt = NonNullable<UseWaitForTransactionReceiptReturnType['data']>
 import { Loader2, CheckCircle, AlertCircle, ExternalLink } from 'lucide-react'
 import { buildTxUrl } from '@/config/wagmi'
 import { decodePotlyError } from '@/lib/errors'
@@ -13,12 +14,13 @@ interface TxButtonProps {
   variant?: 'primary' | 'ghost' | 'danger'
   onSubmit: () => Promise<`0x${string}` | void>
   onSuccess?: () => void
+  onReceipt?: (receipt: Receipt) => void
   className?: string
 }
 
 export function TxButton({
   label, disabled, disabledReason, variant = 'primary',
-  onSubmit, onSuccess, className = '',
+  onSubmit, onSuccess, onReceipt, className = '',
 }: TxButtonProps) {
   const [state, setState]   = useState<TxState>('idle')
   const [hash, setHash]     = useState<`0x${string}` | undefined>()
@@ -33,6 +35,7 @@ export function TxButton({
   if (isSuccess && receipt?.status === 'success' && state === 'confirming') {
     setState('success')
     onSuccess?.()
+    if (onReceipt && receipt) onReceipt(receipt)
   }
   // Handle reverted tx
   if (isSuccess && receipt?.status === 'reverted' && state === 'confirming') {

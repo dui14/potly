@@ -36,7 +36,8 @@ async function sbAdminFetch(path: string, body: unknown): Promise<{ error?: { co
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+  try {
+  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' })
 
   const { alias, address, issuedAt, signature } = req.body as {
     alias?: string; address?: string; issuedAt?: string; signature?: string
@@ -79,4 +80,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   return res.status(201).json({ ok: true, alias: alias.toLowerCase() })
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: 'Internal server error' })
+  }
 }

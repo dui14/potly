@@ -1,84 +1,97 @@
-import { useEffect, useState } from 'react'
+/**
+ * useMyPots — reads potCount, then fetches the newest ≤200 pots via
+ * multicall in batches of 50 (getPot + contributionOf for the wallet).
+ * My pots = creator, recipient, or contribution > 0.
+ * No getLogs dependency.
+ */
+import { useState, useEffect, useCallback } from 'react'
 import { usePublicClient } from 'wagmi'
-import { parseAbiItem } from 'viem'
-import { POTLY_ADDRESS, POTLY_DEPLOY_BLOCK, TARGET_CHAIN_ID } from '@/config/wagmi'
+import { POTLY_ABI } from '@/lib/potlyAbi'
+import { POTLY_ADDRESS, TARGET_CHAIN_ID } from '@/config/wagmi'
 
-export interface MyPotEntry { potId: bigint; role: 'creator' | 'depositor' }
+export interface MyPotEntry { potId: bigint; role: 'creator' | 'recipient' | 'contributor' }
 
-const CHUNK = 2000n
-
-const PotCreatedAbi = parseAbiItem(
-  'event PotCreated(uint256 indexed potId, address indexed creator, address indexed recipient, uint256 target, uint256 slots, uint256 deadline, bytes32 metadataHash)',
-)
-const DepositedAbi = parseAbiItem(
-  'event Deposited(uint256 indexed potId, address indexed depositor, uint256 amount, uint256 raised)',
-)
+const MAX_POTS   = 200
+const BATCH_SIZE = 50
 
 export function useMyPots(address: `0x${string}` | undefined) {
   const client = usePublicClient({ chainId: TARGET_CHAIN_ID })
   const [pots, setPots]         = useState<MyPotEntry[]>([])
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState<string | null>(null)
-  const [progress, setProgress] = useState<{ current: bigint; head: bigint } | null>(null)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (!address || !client) return
-    let cancelled = false
+    setLoading(true)
+    setError(null)
 
-    async function load() {
-      setLoading(true)
-      setError(null)
-      try {
-        const head  = await client!.getBlockNumber()
-        const start = POTLY_DEPLOY_BLOCK
-        const seen  = new Map<bigint, MyPotEntry>()
+    try {
+      // 1. Read potCount
+      const potCountRaw = await client.readContract({
+        address: POTLY_ADDRESS,
+        abi: POTLY_ABI,
+        functionName: 'potCount',
+      }) as bigint
 
-        for (let from = start; from <= head; from += CHUNK) {
-          if (cancelled) return
-          const to = from + CHUNK - 1n < head ? from + CHUNK - 1n : head
-          setProgress({ current: to, head })
+      const total   = Number(potCountRaw)
+      const scanEnd = total               // id of the newest pot (1-indexed)
+      const scanStart = Math.max(1, total - MAX_POTS + 1)
+      const ids: bigint[] = []
+      for (let i = scanEnd; i >= scanStart; i--) ids.push(BigInt(i))
 
-          const [created, deposited] = await Promise.all([
-            client!.getLogs({
-              address: POTLY_ADDRESS,
-              event: PotCreatedAbi,
-              args: { creator: address },
-              fromBlock: from, toBlock: to,
-            }),
-            client!.getLogs({
-              address: POTLY_ADDRESS,
-              event: DepositedAbi,
-              args: { depositor: address },
-              fromBlock: from, toBlock: to,
-            }),
-          ])
+      const seen: MyPotEntry[] = []
 
-          for (const log of created) {
-            const id = log.args.potId as bigint
-            if (!seen.has(id)) seen.set(id, { potId: id, role: 'creator' })
+      // 2. Multicall in batches of BATCH_SIZE
+      for (let b = 0; b < ids.length; b += BATCH_SIZE) {
+        const batch = ids.slice(b, b + BATCH_SIZE)
+        setProgress({ done: b, total: ids.length })
+
+        // Build multicall contracts array: getPot + contributionOf per id
+        const calls = batch.flatMap(potId => [
+          {
+            address: POTLY_ADDRESS,
+            abi: POTLY_ABI,
+            functionName: 'getPot' as const,
+            args: [potId] as const,
+          },
+          {
+            address: POTLY_ADDRESS,
+            abi: POTLY_ABI,
+            functionName: 'contributionOf' as const,
+            args: [potId, address] as const,
+          },
+        ])
+
+        const results = await client.multicall({ contracts: calls, allowFailure: true })
+
+        for (let i = 0; i < batch.length; i++) {
+          const potRes  = results[i * 2]
+          const contRes = results[i * 2 + 1]
+          if (potRes.status !== 'success') continue
+          const pot  = potRes.result as { creator: `0x${string}`; recipient: `0x${string}` }
+          const cont = contRes.status === 'success' ? (contRes.result as bigint) : 0n
+          const addr = address.toLowerCase()
+          if (pot.creator.toLowerCase() === addr) {
+            seen.push({ potId: batch[i], role: 'creator' })
+          } else if (pot.recipient.toLowerCase() === addr) {
+            seen.push({ potId: batch[i], role: 'recipient' })
+          } else if (cont > 0n) {
+            seen.push({ potId: batch[i], role: 'contributor' })
           }
-          for (const log of deposited) {
-            const id = log.args.potId as bigint
-            if (!seen.has(id)) seen.set(id, { potId: id, role: 'depositor' })
-          }
-        }
-
-        if (!cancelled) {
-          setPots(Array.from(seen.values()).sort((a, b) => (a.potId < b.potId ? 1 : -1)))
-          setLoading(false)
-          setProgress(null)
-        }
-      } catch {
-        if (!cancelled) {
-          setError('Failed to load pots. Please try again.')
-          setLoading(false)
         }
       }
-    }
 
-    load()
-    return () => { cancelled = true }
+      setPots(seen) // already newest-first (ids were reversed)
+      setProgress(null)
+    } catch {
+      setError('Failed to load pots.')
+    } finally {
+      setLoading(false)
+    }
   }, [address, client])
 
-  return { pots, loading, error, progress }
+  useEffect(() => { load() }, [load])
+
+  return { pots, loading, error, progress, retry: load }
 }

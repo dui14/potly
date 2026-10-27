@@ -1,11 +1,11 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useAccount, useWriteContract, useSwitchChain } from 'wagmi'
 import { useNavigate } from 'react-router-dom'
-import { isAddress } from 'viem'
+import { isAddress, decodeEventLog } from 'viem'
 import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
 import { POTLY_ABI } from '@/lib/potlyAbi'
 import { POTLY_ADDRESS, TARGET_CHAIN_ID, IS_TESTNET } from '@/config/wagmi'
-import { computeMetadataHash, randomSalt, parseUsdc, formatUsdc } from '@/lib/metadata'
+import { computeMetadataHash, randomSalt, parseUsdc, formatUsdc, saveMeta, postMetadata } from '@/lib/metadata'
 import { estimatedGasUsdc6 } from '@/lib/gas'
 import { useGasPrice } from '@/hooks/useGasPrice'
 import { useUsdcBalance } from '@/hooks/useUsdcBalance'
@@ -33,6 +33,8 @@ export function CreatePotForm() {
   const [title, setTitle]               = useState('')
   const [note, setNote]                 = useState('')
   const [error, setError]               = useState('')
+  const [metaStatus, setMetaStatus]     = useState<'idle' | 'pending' | 'done' | 'failed'>('idle')
+  const pendingMetaRef                  = useRef<{ title: string; note: string; salt: `0x${string}` } | null>(null)
 
   const gasPrice  = useGasPrice()
   const { balance } = useUsdcBalance(address)
@@ -62,7 +64,9 @@ export function CreatePotForm() {
     if (!formValid || !finalRecipient || !address) return
 
     const salt = randomSalt()
-    const hash = computeMetadataHash(title.trim(), note.trim(), salt)
+    const titleTrimmed = title.trim()
+    const noteTrimmed  = note.trim()
+    const hash = computeMetadataHash(titleTrimmed, noteTrimmed, salt)
 
     try {
       const txHash = await writeContractAsync({
@@ -72,7 +76,7 @@ export function CreatePotForm() {
         args: [finalRecipient, targetRaw, BigInt(slots), BigInt(duration), hash],
         chainId: TARGET_CHAIN_ID,
       })
-      sessionStorage.setItem('pendingMeta', JSON.stringify({ title: title.trim(), note: note.trim(), salt }))
+      pendingMetaRef.current = { title: titleTrimmed, note: noteTrimmed, salt }
       return txHash
     } catch (e) {
       setError(decodePotlyError(e))
@@ -207,12 +211,41 @@ export function CreatePotForm() {
       {error && <p className="text-xs text-[var(--danger)] px-1">{error}</p>}
       {!canAfford && <p className="text-xs text-[var(--danger)] px-1">Insufficient USDC for gas</p>}
 
+      {metaStatus === 'pending' && (
+        <p className="text-xs text-[var(--muted)] flex items-center gap-1">
+          <Loader2 size={11} className="animate-spin" /> Saving title…
+        </p>
+      )}
+      {metaStatus === 'failed' && (
+        <p className="text-xs text-[var(--subtle)]">Title pending — will show as "Pot #id" until synced.</p>
+      )}
+
       <TxButton
         label={wrongChain ? 'Switch to Arc' : 'Create Pot'}
         disabled={!formValid || !canAfford}
         disabledReason={!formValid ? 'Fill in all fields' : 'Insufficient USDC for gas'}
         onSubmit={handleSubmit}
         onSuccess={() => navigate('/my')}
+        onReceipt={async (receipt) => {
+          const meta = pendingMetaRef.current
+          if (!meta) return
+          // Parse PotCreated log to get potId
+          let potId: bigint | null = null
+          for (const log of receipt.logs) {
+            try {
+              const decoded = decodeEventLog({ abi: POTLY_ABI, data: log.data, topics: log.topics })
+              if (decoded.eventName === 'PotCreated') {
+                potId = (decoded.args as { potId: bigint }).potId
+                break
+              }
+            } catch { /* not this event */ }
+          }
+          if (potId === null) return
+          saveMeta(TARGET_CHAIN_ID, potId, meta)
+          setMetaStatus('pending')
+          const ok = await postMetadata(TARGET_CHAIN_ID, potId, meta)
+          setMetaStatus(ok ? 'done' : 'failed')
+        }}
       />
     </div>
   )

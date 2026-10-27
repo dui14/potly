@@ -1,57 +1,97 @@
-import { useEffect, useState } from 'react'
-import { usePublicClient } from 'wagmi'
-import { parseAbiItem } from 'viem'
-import { POTLY_ADDRESS, POTLY_DEPLOY_BLOCK, TARGET_CHAIN_ID } from '@/config/wagmi'
-import { useReadContract } from 'wagmi'
+/**
+ * useProofStats — reads potCount, then fetches the newest ≤200 pots via
+ * multicall (getPot batches of 50) to compute proof strip stats.
+ * Caches the result for 30 seconds.  No getLogs dependency.
+ */
+import { useState, useEffect, useRef } from 'react'
+import { usePublicClient, useReadContract } from 'wagmi'
 import { POTLY_ABI } from '@/lib/potlyAbi'
+import { POTLY_ADDRESS, TARGET_CHAIN_ID } from '@/config/wagmi'
 
-const PayoutClaimedAbi = parseAbiItem(
-  'event PayoutClaimed(uint256 indexed potId, address indexed recipient, uint256 payout, uint256 fee)',
-)
-const CHUNK = 2000n
+const MAX_POTS   = 200
+const BATCH_SIZE = 50
+const CACHE_TTL  = 30_000   // ms
+
+interface Stats {
+  potCount:     bigint
+  paidCount:    number
+  usdcSettled:  bigint  // sum of target for PAID pots
+  feesAccrued:  bigint  // sum of floor(target * feeBps / 10000)
+}
+
+const STATUS_PAID = 2
 
 export function useProofStats() {
   const client = usePublicClient({ chainId: TARGET_CHAIN_ID })
-  const [totalPaid, setTotalPaid]     = useState<bigint>(0n)
-  const [loading, setLoading]         = useState(false)
-  const [error, setError]             = useState<string | null>(null)
+  const [stats, setStats]   = useState<Stats | null>(null)
+  const [loading, setLoading] = useState(false)
+  const cacheUntil = useRef(0)
 
-  const { data: potCount } = useReadContract({
+  // feeBps — read once
+  const { data: feeBpsData } = useReadContract({
     address: POTLY_ADDRESS,
     abi: POTLY_ABI,
-    functionName: 'potCount',
+    functionName: 'feeBps',
     chainId: TARGET_CHAIN_ID,
-    query: { refetchInterval: 15_000 },
   })
+  const feeBps = (feeBpsData as number | undefined) ?? 0
 
   useEffect(() => {
     if (!client) return
+    if (Date.now() < cacheUntil.current) return  // still fresh
+
     let cancelled = false
     async function load() {
       setLoading(true)
       try {
-        const head = await client!.getBlockNumber()
-        let sum = 0n
-        for (let from = POTLY_DEPLOY_BLOCK; from <= head; from += CHUNK) {
+        const potCountRaw = await client!.readContract({
+          address: POTLY_ADDRESS,
+          abi: POTLY_ABI,
+          functionName: 'potCount',
+        }) as bigint
+
+        const total    = Number(potCountRaw)
+        const scanEnd  = total
+        const scanStart = Math.max(1, total - MAX_POTS + 1)
+        const ids: bigint[] = []
+        for (let i = scanEnd; i >= scanStart; i--) ids.push(BigInt(i))
+
+        let paidCount   = 0
+        let usdcSettled = 0n
+        let feesAccrued = 0n
+
+        for (let b = 0; b < ids.length; b += BATCH_SIZE) {
           if (cancelled) return
-          const to = from + CHUNK - 1n < head ? from + CHUNK - 1n : head
-          const logs = await client!.getLogs({
+          const batch = ids.slice(b, b + BATCH_SIZE)
+          const calls = batch.map(potId => ({
             address: POTLY_ADDRESS,
-            event: PayoutClaimedAbi,
-            fromBlock: from, toBlock: to,
-          })
-          for (const log of logs) {
-            sum += (log.args.payout as bigint) + (log.args.fee as bigint)
+            abi: POTLY_ABI,
+            functionName: 'getPot' as const,
+            args: [potId] as const,
+          }))
+          const results = await client!.multicall({ contracts: calls, allowFailure: true })
+          for (const r of results) {
+            if (r.status !== 'success') continue
+            const pot = r.result as { status: number; target: bigint }
+            if (pot.status === STATUS_PAID) {
+              paidCount++
+              usdcSettled += pot.target
+              feesAccrued += (pot.target * BigInt(feeBps)) / 10000n
+            }
           }
         }
-        if (!cancelled) { setTotalPaid(sum); setLoading(false) }
-      } catch {
-        if (!cancelled) { setError('Failed to load stats.'); setLoading(false) }
-      }
+
+        if (!cancelled) {
+          setStats({ potCount: potCountRaw, paidCount, usdcSettled, feesAccrued })
+          cacheUntil.current = Date.now() + CACHE_TTL
+        }
+      } catch { /* ignore — last stats stay visible */ }
+      finally { if (!cancelled) setLoading(false) }
     }
+
     load()
     return () => { cancelled = true }
-  }, [client])
+  }, [client, feeBps])
 
-  return { potCount: potCount as bigint | undefined, totalPaid, loading, error }
+  return { stats, loading }
 }

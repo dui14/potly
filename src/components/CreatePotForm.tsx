@@ -1,0 +1,232 @@
+import { useState, useCallback } from 'react'
+import { useAccount, useWriteContract, useSwitchChain } from 'wagmi'
+import { useNavigate } from 'react-router-dom'
+import { isAddress } from 'viem'
+import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
+import { POTLY_ABI } from '@/lib/potlyAbi'
+import { POTLY_ADDRESS, TARGET_CHAIN_ID, IS_TESTNET } from '@/config/wagmi'
+import { computeMetadataHash, randomSalt, parseUsdc, formatUsdc } from '@/lib/metadata'
+import { estimatedGasUsdc6 } from '@/lib/gas'
+import { useGasPrice } from '@/hooks/useGasPrice'
+import { useUsdcBalance } from '@/hooks/useUsdcBalance'
+import { decodePotlyError } from '@/lib/errors'
+import { useResolveRecipient } from '@/hooks/useAlias'
+import { TxButton } from './TxButton'
+
+const DURATION_PRESETS = [
+  { label: '5 min',  value: 5 * 60 },
+  { label: '1 day',  value: 86_400 },
+  { label: '7 days', value: 7 * 86_400 },
+]
+
+export function CreatePotForm() {
+  const { address, chainId } = useAccount()
+  const { switchChain }      = useSwitchChain()
+  const { writeContractAsync } = useWriteContract()
+  const navigate             = useNavigate()
+
+  const [recipientRaw, setRecipientRaw] = useState('')
+  const [confirmed, setConfirmed]       = useState(false)
+  const [targetStr, setTargetStr]       = useState('10')
+  const [slots, setSlots]               = useState(3)
+  const [duration, setDuration]         = useState(86_400)
+  const [title, setTitle]               = useState('')
+  const [note, setNote]                 = useState('')
+  const [error, setError]               = useState('')
+
+  const gasPrice  = useGasPrice()
+  const { balance } = useUsdcBalance(address)
+  const gasEst    = estimatedGasUsdc6('createPot', gasPrice)
+  const canAfford = balance >= gasEst
+  const wrongChain = chainId !== TARGET_CHAIN_ID
+
+  const { resolved, checking, isAlias } = useResolveRecipient(recipientRaw)
+
+  const targetRaw   = (() => { try { return parseUsdc(targetStr) } catch { return 0n } })()
+  const targetValid = targetRaw >= 10_000n && targetRaw <= 500_000_000n
+  const slotsValid  = slots >= 1 && slots <= 100
+
+  // Recipient must be confirmed when it's an alias
+  const recipientAddr = resolved && isAddress(resolved) ? resolved as `0x${string}` : null
+  const recipientDirect = !recipientRaw.startsWith('@') && isAddress(recipientRaw) ? recipientRaw as `0x${string}` : null
+  const finalRecipient = recipientAddr ?? recipientDirect
+
+  // For alias: require explicit confirmation
+  const recipientReady = isAlias ? (!!recipientAddr && confirmed) : !!finalRecipient
+
+  const formValid = recipientReady && targetValid && slotsValid && title.trim().length > 0
+
+  const handleSubmit = useCallback(async (): Promise<`0x${string}` | void> => {
+    setError('')
+    if (wrongChain) { switchChain({ chainId: TARGET_CHAIN_ID }); return }
+    if (!formValid || !finalRecipient || !address) return
+
+    const salt = randomSalt()
+    const hash = computeMetadataHash(title.trim(), note.trim(), salt)
+
+    try {
+      const txHash = await writeContractAsync({
+        address: POTLY_ADDRESS,
+        abi: POTLY_ABI,
+        functionName: 'createPot',
+        args: [finalRecipient, targetRaw, BigInt(slots), BigInt(duration), hash],
+        chainId: TARGET_CHAIN_ID,
+      })
+      sessionStorage.setItem('pendingMeta', JSON.stringify({ title: title.trim(), note: note.trim(), salt }))
+      return txHash
+    } catch (e) {
+      setError(decodePotlyError(e))
+      throw e
+    }
+  }, [wrongChain, formValid, finalRecipient, address, title, note, targetRaw, slots, duration, switchChain, writeContractAsync])
+
+  const suggestedShare = slots > 0 ? targetRaw / BigInt(slots) : 0n
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Recipient */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-sm font-medium text-[var(--ink-2)]">
+          Recipient <span className="text-[var(--subtle)] font-normal">(address or @alias)</span>
+        </label>
+        <input
+          value={recipientRaw}
+          onChange={e => { setRecipientRaw(e.target.value); setConfirmed(false) }}
+          placeholder="0x… or @alice"
+          className="w-full bg-[var(--surface-muted)] border border-[var(--border)] focus:border-[var(--border-strong)] rounded-xl px-3 py-2.5 text-sm font-mono outline-none transition"
+        />
+        {/* Alias resolution */}
+        {isAlias && checking && (
+          <div className="flex items-center gap-1 text-xs text-[var(--muted)]">
+            <Loader2 size={11} className="animate-spin" /> Resolving alias…
+          </div>
+        )}
+        {isAlias && !checking && recipientAddr && !confirmed && (
+          <div className="flex flex-col gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface-muted)] p-3 text-sm">
+            <div className="flex items-center gap-1.5 text-[var(--success)] text-xs font-medium">
+              <CheckCircle size={11} /> Verified alias
+            </div>
+            <p className="text-[var(--ink-2)] font-mono text-xs">{recipientAddr}</p>
+            <button
+              onClick={() => setConfirmed(true)}
+              className="self-start rounded-lg px-3 py-1.5 text-xs font-semibold bg-[var(--accent)] text-white hover:opacity-90 transition"
+            >
+              Confirm this recipient
+            </button>
+          </div>
+        )}
+        {isAlias && !checking && recipientAddr && confirmed && (
+          <div className="flex items-center gap-1.5 text-xs text-[var(--success)]">
+            <CheckCircle size={11} /> {formatAddress(recipientAddr)} confirmed
+          </div>
+        )}
+        {isAlias && !checking && !recipientAddr && recipientRaw.length > 1 && (
+          <p className="text-xs text-[var(--danger)] flex items-center gap-1">
+            <AlertCircle size={11} /> Alias not found
+          </p>
+        )}
+        {!isAlias && recipientRaw && !isAddress(recipientRaw) && (
+          <p className="text-xs text-[var(--danger)]">Invalid address</p>
+        )}
+      </div>
+
+      {/* Target */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-sm font-medium text-[var(--ink-2)]">Target total (USDC)</label>
+        <input
+          value={targetStr}
+          onChange={e => setTargetStr(e.target.value)}
+          type="number" min="0.01" max="500" step="0.01"
+          className="bg-[var(--surface-muted)] border border-[var(--border)] focus:border-[var(--border-strong)] rounded-xl px-3 py-2.5 text-sm outline-none transition"
+        />
+        {targetStr && !targetValid && (
+          <p className="text-xs text-[var(--danger)]">Target must be 0.01–500 USDC</p>
+        )}
+      </div>
+
+      {/* Slots */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-sm font-medium text-[var(--ink-2)]">
+          Max contributors — {slots}
+          {suggestedShare > 0n && <span className="text-[var(--subtle)] font-normal"> · suggested ${formatUsdc(suggestedShare)} each</span>}
+        </label>
+        <input
+          type="range" min={1} max={100} value={slots}
+          onChange={e => setSlots(Number(e.target.value))}
+          className="w-full"
+        />
+        <div className="flex justify-between text-xs text-[var(--subtle)]"><span>1</span><span>100</span></div>
+      </div>
+
+      {/* Duration */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-sm font-medium text-[var(--ink-2)]">Duration</label>
+        <div className="flex gap-2">
+          {DURATION_PRESETS.map(p => (
+            <button
+              key={p.value}
+              onClick={() => setDuration(p.value)}
+              className={`flex-1 px-3 py-2 rounded-xl text-sm font-medium border transition ${duration === p.value ? 'bg-[var(--accent)] text-white border-transparent' : 'bg-[var(--surface)] border-[var(--border)] text-[var(--ink-2)] hover:border-[var(--border-strong)]'}`}
+            >{p.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Title */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-sm font-medium text-[var(--ink-2)]">Title <span className="text-[var(--subtle)] font-normal">(max 80)</span></label>
+        <input
+          value={title}
+          onChange={e => setTitle(e.target.value.slice(0, 80))}
+          placeholder="Birthday gift for Alice"
+          className="bg-[var(--surface-muted)] border border-[var(--border)] focus:border-[var(--border-strong)] rounded-xl px-3 py-2.5 text-sm outline-none transition"
+        />
+      </div>
+
+      {/* Note */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-sm font-medium text-[var(--ink-2)]">Note <span className="text-[var(--subtle)] font-normal">(max 280)</span></label>
+        <textarea
+          value={note}
+          onChange={e => setNote(e.target.value.slice(0, 280))}
+          rows={2}
+          placeholder="Optional message…"
+          className="bg-[var(--surface-muted)] border border-[var(--border)] focus:border-[var(--border-strong)] rounded-xl px-3 py-2.5 text-sm outline-none transition resize-none"
+        />
+      </div>
+
+      {/* Summary */}
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] p-4 flex flex-col gap-2 text-sm">
+        <Row label="Target"           value={`$${formatUsdc(targetRaw)} USDC`} strong />
+        <Row label="Suggested share"  value={suggestedShare > 0n ? `$${formatUsdc(suggestedShare)} USDC` : '—'} />
+        <Row label="Protocol fee"     value="0.05% only when paid out" />
+        <Row label="Est. gas"         value={`~$${formatUsdc(gasEst)} USDC`} />
+        {!IS_TESTNET && <Row label="" value="Real USDC — mainnet" danger />}
+      </div>
+
+      {error && <p className="text-xs text-[var(--danger)] px-1">{error}</p>}
+      {!canAfford && <p className="text-xs text-[var(--danger)] px-1">Insufficient USDC for gas</p>}
+
+      <TxButton
+        label={wrongChain ? 'Switch to Arc' : 'Create Pot'}
+        disabled={!formValid || !canAfford}
+        disabledReason={!formValid ? 'Fill in all fields' : 'Insufficient USDC for gas'}
+        onSubmit={handleSubmit}
+        onSuccess={() => navigate('/my')}
+      />
+    </div>
+  )
+}
+
+function Row({ label, value, strong, danger }: { label: string; value: string; strong?: boolean; danger?: boolean }) {
+  return (
+    <div className="flex justify-between items-center">
+      <span className="text-[var(--muted)]">{label}</span>
+      <span className={`tabular-nums ${strong ? 'font-semibold text-[var(--ink)]' : danger ? 'text-[var(--danger)]' : 'text-[var(--ink-2)]'}`}>{value}</span>
+    </div>
+  )
+}
+
+function formatAddress(addr: string): string {
+  return addr.slice(0, 6) + '…' + addr.slice(-4)
+}

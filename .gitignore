@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+
+# Environment — never commit secrets
+.env
+.env.*
+.env.local
+.env.*.local
+
+# Foundry
+cache/
+broadcast/
+lib/
+
+# Compiled contract artifacts
+contracts/out/
+contracts/cache/
+
+# Docs / notes (keep only README.md)
+*.md
+!README.md
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Circle recovery files — never commit
+.circle/
+recovery_file*
+
+# Vercel / deployment
+.vercel/
+
+# Bun
+bun.lockb

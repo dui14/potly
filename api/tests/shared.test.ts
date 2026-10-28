@@ -238,6 +238,90 @@ function afterAll(fn: () => void) {
   }
 }
 
+// ── Issue 1: fmtFee — never invent fee values ──────────────────────────────────
+
+describe('fmtFee — fee column for history table', () => {
+  // Pure function mirroring the ContributorsList fmtFee logic.
+  // Deposit and withdrawal events must show "—" (no protocol fee).
+  function fmtFee(ev: { extra?: Record<string, unknown> }): string {
+    const fee = ev.extra?.fee
+    if (fee === undefined || fee === null || fee === '' || fee === '0') return '—'
+    const n = Number(BigInt(String(fee))) / 1_000_000
+    if (n === 0) return '—'
+    return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 }) + ' USDC'
+  }
+
+  it('returns "—" when extra.fee is absent (deposit event)', () => {
+    expect(fmtFee({ extra: {} })).toBe('—')
+  })
+  it('returns "—" when extra.fee is "0" (withdrawal event)', () => {
+    expect(fmtFee({ extra: { fee: '0' } })).toBe('—')
+  })
+  it('returns formatted USDC for a real payout fee', () => {
+    const result = fmtFee({ extra: { fee: '5000' } }) // 0.005 USDC
+    expect(result).not.toBe('—')
+    expect(result).toContain('USDC')
+    expect(result.startsWith('0.005')).toBe(true)
+  })
+  it('never fabricates a fee — undefined extra returns "—"', () => {
+    expect(fmtFee({})).toBe('—')
+    expect(fmtFee({ extra: undefined })).toBe('—')
+  })
+})
+
+// ── Issue 3: pots API pagination ───────────────────────────────────────────────
+
+describe('/wallets/:address/pots — offset/limit pagination', () => {
+  function applyPagination(allIds: string[], offset: number, limit: number) {
+    const fetchN  = offset + limit + 1
+    const page    = allIds.slice(offset, fetchN)
+    const hasMore = page.length > limit
+    const potIds  = hasMore ? page.slice(0, limit) : page
+    return { potIds, hasMore, total: allIds.length }
+  }
+
+  it('returns first 6 with hasMore=true when >6 exist', () => {
+    const all = ['10','9','8','7','6','5','4','3','2','1']
+    const r = applyPagination(all, 0, 6)
+    expect(r.potIds).toEqual(['10','9','8','7','6','5'])
+    expect(r.hasMore).toBe(true)
+    expect(r.total).toBe(10)
+  })
+
+  it('returns all items with hasMore=false when <=6 exist', () => {
+    const all = ['3','2','1']
+    const r = applyPagination(all, 0, 6)
+    expect(r.potIds).toEqual(['3','2','1'])
+    expect(r.hasMore).toBe(false)
+  })
+
+  it('Load more: second page returns next 6 without duplicates', () => {
+    const all = ['10','9','8','7','6','5','4','3','2','1']
+    const p1 = applyPagination(all, 0, 6)
+    const p2 = applyPagination(all, 6, 6)
+    expect(p1.potIds).toEqual(['10','9','8','7','6','5'])
+    expect(p2.potIds).toEqual(['4','3','2','1'])
+    expect(p2.hasMore).toBe(false)
+    // No duplicates
+    const combined = [...p1.potIds, ...p2.potIds]
+    expect(new Set(combined).size).toBe(combined.length)
+  })
+
+  it('handles exact-multiple page boundary with hasMore=false', () => {
+    const all = ['6','5','4','3','2','1']
+    const r = applyPagination(all, 0, 6)
+    expect(r.potIds.length).toBe(6)
+    expect(r.hasMore).toBe(false)
+  })
+
+  it('returns empty when offset >= total', () => {
+    const all = ['3','2','1']
+    const r = applyPagination(all, 10, 6)
+    expect(r.potIds).toEqual([])
+    expect(r.hasMore).toBe(false)
+  })
+})
+
 // ── A1: block_time ISO conversion ─────────────────────────────────────────────
 
 describe('toIso — block timestamp to ISO 8601', () => {

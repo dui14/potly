@@ -20,8 +20,6 @@ const TAB_LABELS: { id: Tab; label: string }[] = [
   { id: 'closed', label: 'Closed' },
 ]
 
-const PAGE_SIZE = 12
-
 export function MyPotsPage() {
   const { address } = useAccount()
   const location    = useLocation()
@@ -32,9 +30,8 @@ export function MyPotsPage() {
     try { return s ? BigInt(s) : undefined } catch { return undefined }
   })()
 
-  const { pots, loading, error, progress, retry } = useMyPots(address, newPotId)
-  const [tab, setTab]   = useState<Tab>('all')
-  const [page, setPage] = useState(1)
+  const { pots, loading, loadingMore, hasMore, error, progress, retry, loadMore } = useMyPots(address, newPotId)
+  const [tab, setTab] = useState<Tab>('all')
 
   if (!address) {
     return (
@@ -44,12 +41,6 @@ export function MyPotsPage() {
       </main>
     )
   }
-
-  // Tabs filter inside PotCard (hooks must run per component).
-  // At the list level just pass all pots; PotCard returns null if tab doesn't match.
-  const shown = pots
-
-  const visibleMax = page * PAGE_SIZE
 
   return (
     <main className="max-w-[1120px] mx-auto px-4 py-8 flex flex-col gap-6">
@@ -63,7 +54,7 @@ export function MyPotsPage() {
         {TAB_LABELS.map(t => (
           <button
             key={t.id}
-            onClick={() => { setTab(t.id); setPage(1) }}
+            onClick={() => { setTab(t.id) }}
             className={[
               'px-4 py-1.5 rounded-lg text-sm font-medium transition',
               tab === t.id
@@ -115,17 +106,18 @@ export function MyPotsPage() {
       {!loading && pots.length > 0 && (
         <>
           <div className="pots-grid">
-            {shown.slice(0, visibleMax).map(({ potId, role }) => (
+            {pots.map(({ potId, role }) => (
               <PotCard key={potId.toString()} potId={potId} role={role} tab={tab} />
             ))}
           </div>
-          {visibleMax < shown.length && (
+          {hasMore && (
             <div className="flex justify-center pt-2">
               <button
-                onClick={() => setPage(p => p + 1)}
-                className="px-6 py-2 rounded-xl border border-[var(--border)] text-sm text-[var(--ink-2)] hover:border-[var(--border-strong)] transition"
+                onClick={() => void loadMore()}
+                disabled={loadingMore}
+                className="px-6 py-2 rounded-xl border border-[var(--border)] text-sm text-[var(--ink-2)] hover:border-[var(--border-strong)] transition disabled:opacity-40"
               >
-                Load more
+                {loadingMore ? 'Loading…' : 'Load more'}
               </button>
             </div>
           )}

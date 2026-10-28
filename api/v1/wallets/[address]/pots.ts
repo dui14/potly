@@ -13,6 +13,7 @@ import { POTLY_ADDRESS, CHAIN_ID, sbRpc, validateAddress, makeClient } from '../
 
 const DEFAULT_LIMIT = 200
 const FALLBACK_SCAN_LIMIT = 100  // never scan more than this many pots via RPC
+const MAX_PAGE_SIZE = 50
 
 // Minimal ABI slices needed for the fallback multicall
 const POT_ABI = [
@@ -94,10 +95,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!wallet) return res.status(400).json({ ok: false, error: 'Invalid address' })
     if (!POTLY_ADDRESS) return res.status(503).json({ ok: false, error: 'Contract not configured' })
 
+    // Pagination: offset (0-based) and limit (default 6, max 50)
+    const rawOffset = Number(req.query.offset ?? 0)
+    const rawLimit  = Number(req.query.limit  ?? 6)
+    const offset    = isFinite(rawOffset) && rawOffset >= 0 ? Math.floor(rawOffset) : 0
+    const limit     = Math.min(Math.max(1, isFinite(rawLimit) ? Math.floor(rawLimit) : 6), MAX_PAGE_SIZE)
+    // Fetch one extra to detect hasMore
+    const fetchN    = offset + limit + 1
+
     const SB_URL = process.env.SUPABASE_URL
     const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-    let potIds: string[] = []
+    let allPotIds: string[] = []
     let source: 'index' | 'chain' = 'index'
 
     // ── Primary: Supabase index ──────────────────────────────────────────────
@@ -109,7 +118,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           p_wallet:   wallet,
           p_limit:    DEFAULT_LIMIT,
         }) as { pot_id: string; last_block: string }[]
-        potIds = (rows ?? []).map(r => r.pot_id)
+        allPotIds = (rows ?? []).map(r => r.pot_id)
       } catch (sbErr) {
         // Supabase error — fall through to chain scan below
         void sbErr
@@ -117,25 +126,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ── Fallback: bounded chain scan ─────────────────────────────────────────
-    // Use fallback when Supabase is absent, errored, or returned nothing.
-    // "Nothing from Supabase" can mean either: (a) the wallet genuinely has no pots
-    // in the index (indexer not yet caught up), or (b) a real empty list. We use
-    // the fallback whenever the primary returns 0 results, capped at 100 pots.
-    if (potIds.length === 0) {
+    if (allPotIds.length === 0) {
       try {
-        potIds = await fallbackChainScan(wallet)
+        allPotIds = await fallbackChainScan(wallet)
         source = 'chain'
       } catch {
-        // Chain scan failed too — return empty with a warning
         res.setHeader('Cache-Control', 'no-store')
-        return res.status(200).json({ ok: true, potIds: [], source: 'error', note: 'Both index and chain scan failed' })
+        return res.status(200).json({ ok: true, potIds: [], hasMore: false, total: 0, source: 'error', note: 'Both index and chain scan failed' })
       }
     }
 
-    // no-store: wallet pot lists are per-user and must never be served from an
-    // edge cache — a stale response after creation is the #1 "new pot missing" bug.
+    // Apply pagination
+    const total   = allPotIds.length
+    const page    = allPotIds.slice(offset, fetchN)
+    const hasMore = page.length > limit
+    const potIds  = hasMore ? page.slice(0, limit) : page
+
+    // no-store: wallet pot lists are per-user and must never be edge-cached.
     res.setHeader('Cache-Control', 'no-store')
-    return res.status(200).json({ ok: true, potIds, source })
+    return res.status(200).json({ ok: true, potIds, hasMore, total, offset, limit, source })
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err) })
   }

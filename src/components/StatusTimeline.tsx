@@ -10,6 +10,7 @@ import { formatAddress } from '@/lib/utils'
 import { formatDateTime } from '@/lib/fmt'
 import type { PotData } from '@/hooks/usePot'
 import type { PotEvent } from '@/hooks/useActivity'
+import { useCreatedAt } from '@/hooks/useCreatedAt'
 
 interface Props {
   pot: PotData
@@ -42,7 +43,9 @@ const DOT = 'w-2 h-2 rounded-full bg-[var(--accent)] mt-1 shrink-0'
 const DONE_DOT = 'w-2 h-2 rounded-full bg-[var(--success)] mt-1 shrink-0'
 const FADE_DOT = 'w-2 h-2 rounded-full bg-[var(--subtle)] mt-1 shrink-0'
 
-export function StatusTimeline({ pot, events, aliases, chainTime, onRefresh }: Props) {
+export function StatusTimeline({ pot, potId, events, aliases, chainTime, onRefresh: _onRefresh }: Props) {
+  // Chain-direct creation timestamp (falls back to DB event if indexed)
+  const chainCreatedAt = useCreatedAt(potId)
   const createdEvt  = events.find(e => e.kind === 'created')
   const filledEvt   = events.find(e => e.kind === 'filled')
   const payoutEvt   = events.find(e => e.kind === 'payout')
@@ -56,17 +59,21 @@ export function StatusTimeline({ pot, events, aliases, chainTime, onRefresh }: P
 
   const steps: React.ReactNode[] = []
 
-  // Created: use event when available; if missing but pot exists, show "Syncing..."
+  // Created: prefer DB event (has tx_hash) → chain getLogs result → "—"
+  // Never show "Syncing…" — chain data is always available.
+  const createdTime = createdEvt
+    ? fmtTs(createdEvt.block_time)
+    : chainCreatedAt
+      ? fmtTs(chainCreatedAt)
+      : '—'
   steps.push(
     <Step key="created" dot={<span className={DONE_DOT} />}
       label="Created"
-      time={createdEvt ? fmtTs(createdEvt.block_time) : 'Syncing…'}
+      time={createdTime}
       sub={
         createdEvt
           ? <a href={buildTxUrl(createdEvt.tx_hash)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[var(--muted)] hover:text-[var(--ink)] text-xs">tx <ExternalLink size={10} /></a>
-          : onRefresh
-            ? <button onClick={onRefresh} className="text-xs text-[var(--accent)] hover:underline">Refresh</button>
-            : null
+          : null
       }
     />,
   )

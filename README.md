@@ -66,10 +66,8 @@ forge test --gas-report
 
 ## Deployed contracts
 
-| Network | Address |
-|---|---|
-| Arc Testnet (v2) | `0xb9df333d7c5c9a6ee82db13fa3019855e7fca880` |
+| Network | Address | Block | Transaction hash |
+|---|---|---|---|
+| Arc Testnet | `0xb9df333d7c5c9a6ee82db13fa3019855e7fca880` | 69337210 | [0x7f44affc62c673dde12348bd3b1b371a878e678b9f6b7346a85c9ddc3afb4246](https://explorer.testnet.arc.io/tx/0x7f44affc62c673dde12348bd3b1b371a878e678b9f6b7346a85c9ddc3afb4246) |
+| Arc Mainnet | | | |
 
-## Deploy to Vercel
-
-Connect the repo in the Vercel dashboard. Set all environment variables listed above. The `vercel.json` rewrites handle client-side routing and the `api/` directory provides serverless functions automatically.

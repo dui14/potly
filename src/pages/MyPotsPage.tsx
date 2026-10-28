@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useAccount } from 'wagmi'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { ConnectKitButton } from 'connectkit'
 import { Loader2 } from 'lucide-react'
 import { useMyPots } from '@/hooks/useMyPots'
@@ -24,7 +24,15 @@ const PAGE_SIZE = 12
 
 export function MyPotsPage() {
   const { address } = useAccount()
-  const { pots, loading, error, progress, retry } = useMyPots(address)
+  const location    = useLocation()
+  // potId passed via navigation state so the new pot shows immediately
+  // before the API / indexer catches up.
+  const newPotId: bigint | undefined = (() => {
+    const s = (location.state as { newPotId?: string } | null)?.newPotId
+    try { return s ? BigInt(s) : undefined } catch { return undefined }
+  })()
+
+  const { pots, loading, error, progress, retry } = useMyPots(address, newPotId)
   const [tab, setTab]   = useState<Tab>('all')
   const [page, setPage] = useState(1)
 

@@ -264,7 +264,7 @@ export function CreatePotForm() {
         disabled={!formValid || !canAfford}
         disabledReason={!formValid ? 'Fill in all fields' : 'Insufficient USDC for gas'}
         onSubmit={handleSubmit}
-        onSuccess={() => navigate('/my')}
+        onSuccess={() => { /* navigation handled in onReceipt with potId state */ }}
         onReceipt={async (receipt) => {
           const meta = pendingMetaRef.current
           if (!meta) return
@@ -281,6 +281,9 @@ export function CreatePotForm() {
           }
           if (potId === null) return
           saveMeta(TARGET_CHAIN_ID, potId, meta)
+          // Navigate with the new potId so MyPotsPage can show it immediately
+          // even before the API / indexer has caught up.
+          navigate('/my', { state: { newPotId: potId.toString() } })
           setMetaStatus('pending')
           const ok = await postMetadata(TARGET_CHAIN_ID, potId, meta)
           setMetaStatus(ok ? 'done' : 'failed')

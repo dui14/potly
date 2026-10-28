@@ -127,12 +127,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         source = 'chain'
       } catch {
         // Chain scan failed too — return empty with a warning
-        res.setHeader('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=30')
+        res.setHeader('Cache-Control', 'no-store')
         return res.status(200).json({ ok: true, potIds: [], source: 'error', note: 'Both index and chain scan failed' })
       }
     }
 
-    res.setHeader('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=30')
+    // no-store: wallet pot lists are per-user and must never be served from an
+    // edge cache — a stale response after creation is the #1 "new pot missing" bug.
+    res.setHeader('Cache-Control', 'no-store')
     return res.status(200).json({ ok: true, potIds, source })
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err) })

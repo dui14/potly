@@ -16,18 +16,35 @@ export interface MyPotEntry { potId: bigint; role: 'creator' | 'recipient' | 'co
 const BATCH_SIZE      = 50
 const FALLBACK_MAX    = 200
 
-export function useMyPots(address: `0x${string}` | undefined) {
+/**
+ * @param newPotId  - pot id from navigation state after creation; guaranteed to
+ *                    be prepended as role=creator even if the API/chain scan
+ *                    hasn't caught up yet (fixes "new pot missing" race).
+ */
+export function useMyPots(address: `0x${string}` | undefined, newPotId?: bigint) {
   const client = usePublicClient({ chainId: TARGET_CHAIN_ID })
-  const [pots, setPots]         = useState<MyPotEntry[]>([])
+  // Optimistic initial state: show the new pot immediately while the load runs.
+  const [pots, setPots]         = useState<MyPotEntry[]>(
+    newPotId !== undefined ? [{ potId: newPotId, role: 'creator' }] : [],
+  )
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState<string | null>(null)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+
+  // Merge helper: prepend newPotId as creator if it's not already in the list.
+  function mergeNew(list: MyPotEntry[]): MyPotEntry[] {
+    if (newPotId === undefined) return list
+    const already = list.some(p => p.potId === newPotId)
+    if (already) return list
+    return [{ potId: newPotId, role: 'creator' }, ...list]
+  }
 
   const load = useCallback(async () => {
     if (!address || !client) return
     setLoading(true)
     setError(null)
-    setPots([])
+    // Do NOT reset pots here — the optimistic newPotId entry should remain
+    // visible while loading.  mergeNew() ensures it stays after the load too.
 
     try {
       // ── 1. Try API ──────────────────────────────────────────────────────
@@ -65,7 +82,7 @@ export function useMyPots(address: `0x${string}` | undefined) {
             else if (cont > 0n) seen.push({ potId: batch[i], role: 'contributor' })
           }
         }
-        setPots(seen)
+        setPots(mergeNew(seen))
         setProgress(null)
         setLoading(false)
         return
@@ -104,7 +121,7 @@ export function useMyPots(address: `0x${string}` | undefined) {
           else if (cont > 0n) seen.push({ potId: batch[i], role: 'contributor' })
         }
       }
-      setPots(seen)
+      setPots(mergeNew(seen))
       setProgress(null)
     } catch {
       setError('Failed to load pots.')

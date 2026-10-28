@@ -100,7 +100,10 @@ export function ContributorsList({
     }
   }, [JSON.stringify(events.map(e => `${e.kind}${e.wallet}${e.amount}`))])
 
-  // Multicall contributionOf
+  // Multicall contributionOf — fires once when the wallet address list stabilises.
+  // Dep is a sorted address fingerprint so it re-runs only when addresses change,
+  // not on every wallets.length bump caused by the liveAmount update above.
+  const walletAddrKey = wallets.map(w => w.address).sort().join(',')
   useEffect(() => {
     if (!client || wallets.length === 0) return
     let cancelled = false
@@ -117,7 +120,8 @@ export function ContributorsList({
       })))
     }).catch(() => { /* keep event-derived amounts */ })
     return () => { cancelled = true }
-  }, [client, potId.toString(), wallets.length])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, potId.toString(), walletAddrKey])
 
   useEffect(() => () => { cooldownRef.current && clearTimeout(cooldownRef.current) }, [])
 

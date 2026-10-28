@@ -44,9 +44,9 @@ const DONE_DOT = 'w-2 h-2 rounded-full bg-[var(--success)] mt-1 shrink-0'
 const FADE_DOT = 'w-2 h-2 rounded-full bg-[var(--subtle)] mt-1 shrink-0'
 
 export function StatusTimeline({ pot, potId, events, aliases, chainTime, onRefresh: _onRefresh }: Props) {
-  // Chain-direct creation timestamp (falls back to DB event if indexed)
-  const chainCreatedAt = useCreatedAt(potId)
   const createdEvt  = events.find(e => e.kind === 'created')
+  // Pass the DB ISO time so useCreatedAt can skip the RPC call when DB has it.
+  const chainCreatedAt = useCreatedAt(potId, createdEvt?.block_time ?? null)
   const filledEvt   = events.find(e => e.kind === 'filled')
   const payoutEvt   = events.find(e => e.kind === 'payout')
   const cancelEvt   = events.find(e => e.kind === 'cancelled')

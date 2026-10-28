@@ -113,19 +113,15 @@ export function useActivity(potId: bigint | undefined, raisedAmount?: bigint) {
 
     if (!inconsistent || retryCount.current >= 2) return
 
-    // Inconsistency detected — trigger tick + refetch
+    // Inconsistency detected — re-fetch from DB only (no automatic RPC scan).
+    // The user can click Refresh to explicitly trigger a chain scan if needed.
     syncingRef.current = true
-    setState(s => ({ ...s, syncing: true }))
+    retryCount.current += 1
     const attempt = async () => {
-      try {
-        await fetch(`/api/v1/index/tick`, { method: 'POST' })
-      } catch { /* best-effort */ }
       await fetchActivity()
-      retryCount.current += 1
       syncingRef.current = false
-      setState(s => ({ ...s, syncing: false }))
     }
-    retryTimerRef.current = setTimeout(attempt, retryCount.current === 0 ? 0 : 4000)
+    retryTimerRef.current = setTimeout(attempt, retryCount.current === 1 ? 2000 : 4000)
   }, [state.lastFetch, state.events.length, raisedAmount?.toString(), potId?.toString()])
 
   // ── Initial load ───────────────────────────────────────────────────────────
@@ -154,15 +150,11 @@ export function useActivity(potId: bigint | undefined, raisedAmount?: bigint) {
     await fetchActivity(100)
   }, [potId, fetchActivity])
 
-  // ── Manual refresh (with 10 s cooldown enforced by caller) ─────────────────
+  // ── Manual refresh — re-reads from DB after caller has already scanned chain ─
+  // (ContributorsList calls POST .../rescan first, then calls this.)
   const refresh = useCallback(async () => {
     if (potId === undefined) return
-    setState(s => ({ ...s, syncing: true }))
-    try {
-      await fetch('/api/v1/index/tick', { method: 'POST' })
-    } catch { /* best-effort */ }
     await fetchActivity(100)
-    setState(s => ({ ...s, syncing: false }))
   }, [potId, fetchActivity])
 
   return {

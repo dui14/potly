@@ -26,6 +26,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+*.sql
 
 # Circle recovery files (never commit)
 .circle/

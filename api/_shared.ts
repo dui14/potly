@@ -47,7 +47,13 @@ export async function sbPost(path: string, body: unknown): Promise<void> {
     headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=minimal' },
     body: JSON.stringify(body),
   })
-  if (res.status !== 201 && res.status !== 204) { const t = await res.text().catch(() => ''); throw new Error(`Supabase ${res.status}: ${t}`) }
+  // PostgREST returns 201 on insert, 204 on empty result-set, and 200 on
+  // conflict-ignored rows (resolution=ignore-duplicates with return=minimal).
+  // Treat all three as success; anything else is a real error.
+  if (res.status !== 200 && res.status !== 201 && res.status !== 204) {
+    const t = await res.text().catch(() => '')
+    throw new Error(`Supabase ${res.status}: ${t}`)
+  }
 }
 
 export async function sbRpc(fn: string, params: Record<string, unknown>): Promise<unknown> {
@@ -72,7 +78,11 @@ export async function sbUpsert(table: string, path: string, body: unknown, onCon
     body: JSON.stringify(body),
   })
   void onConflict  // used by caller for documentation only; Prefer header handles it
-  if (res.status !== 201 && res.status !== 204) { const t = await res.text().catch(() => ''); throw new Error(`Supabase upsert ${res.status}: ${t}`) }
+  // PostgREST returns 200/201/204 on successful upserts depending on version and return mode.
+  if (res.status !== 200 && res.status !== 201 && res.status !== 204) {
+    const t = await res.text().catch(() => '')
+    throw new Error(`Supabase upsert ${res.status}: ${t}`)
+  }
 }
 
 // ── Event ABI ────────────────────────────────────────────────────────────────

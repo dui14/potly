@@ -5,6 +5,7 @@ import { useAliasAvailability, updateAlias } from '@/hooks/useAlias'
 import { invalidateAliasCache } from '@/lib/supabase'
 
 const ALIAS_RE = /^[a-z0-9_]{3,20}$/
+const RESERVED = new Set(['admin', 'support', 'potly', 'treasury', 'arc', 'circle', 'usdc', 'official'])
 
 interface Props {
   address: string
@@ -20,8 +21,9 @@ export function EditAliasModal({ address, currentAlias, onClose, onUpdated }: Pr
   const [serverErr, setServerErr]   = useState('')
   const [done, setDone]             = useState(false)
 
-  const newAlias = input.toLowerCase()
-  const valid    = ALIAS_RE.test(newAlias) && newAlias !== currentAlias.toLowerCase()
+  const newAlias  = input.toLowerCase().trim()
+  const reserved  = RESERVED.has(newAlias)
+  const valid     = ALIAS_RE.test(newAlias) && !reserved && newAlias !== currentAlias.toLowerCase()
   const { available, checking } = useAliasAvailability(valid ? newAlias : '')
 
   if (done) {
@@ -56,30 +58,32 @@ export function EditAliasModal({ address, currentAlias, onClose, onUpdated }: Pr
         <h2 className="text-base font-semibold text-[var(--ink)]">Edit alias</h2>
         <p className="text-xs text-[var(--muted)]">
           Current: <span className="font-mono text-[var(--ink-2)]">@{currentAlias}</span>.
-          {' '}3–20 chars, a–z 0–9 _. At most one change per hour.
-        </p>
-        <p className="text-xs text-[var(--subtle)]">
+          {' '}3–20 characters: a–z, 0–9 or underscore. Reserved words not allowed. At most one change per hour.
           Existing pots are unaffected — recipients are stored on-chain as addresses.
         </p>
-
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-2 bg-[var(--surface-muted)] border border-[var(--border)] rounded-xl px-3 py-2.5">
             <span className="text-[var(--muted)] text-sm">@</span>
             <input
               value={input}
-              onChange={e => { setInput(e.target.value.replace(/[^a-z0-9_]/gi, '')); setServerErr('') }}
+              onChange={e => { setInput(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '')); setServerErr('') }}
               placeholder="new_alias"
               maxLength={20}
+              autoCapitalize="none"
               className="bg-transparent flex-1 text-sm outline-none text-[var(--ink)]"
               autoFocus
             />
             {valid && checking  && <Loader2  size={12} className="animate-spin text-[var(--muted)]" />}
             {valid && !checking && available === true  && <CheckCircle size={12} className="text-[var(--success)]" />}
-            {valid && !checking && available === false && <AlertCircle size={12} className="text-[var(--danger)]" />}
+            {(reserved || (!valid && input.length > 0) || (!checking && valid && available === false)) && <AlertCircle size={12} className="text-[var(--danger)]" />}
           </div>
-          {valid && !checking && available === false && <p className="text-xs text-[var(--danger)]">Alias taken</p>}
-          {!valid && input.length > 0 && newAlias === currentAlias.toLowerCase() && (
+          {reserved && <p className="text-xs text-[var(--danger)]">That alias is reserved</p>}
+          {!reserved && valid && !checking && available === false && <p className="text-xs text-[var(--danger)]">Alias is already taken</p>}
+          {!reserved && !valid && input.length > 0 && newAlias === currentAlias.toLowerCase() && (
             <p className="text-xs text-[var(--muted)]">Must differ from current alias</p>
+          )}
+          {!reserved && !valid && input.length >= 3 && newAlias !== currentAlias.toLowerCase() && (
+            <p className="text-xs text-[var(--muted)]">3-20 characters: a-z, 0-9 or underscore</p>
           )}
         </div>
 

@@ -5,6 +5,7 @@ import { useAliasAvailability, claimAlias } from '@/hooks/useAlias'
 import { supabaseAvailable } from '@/lib/supabase'
 
 const ALIAS_RE = /^[a-z0-9_]{3,20}$/
+const RESERVED = new Set(['admin', 'support', 'potly', 'treasury', 'arc', 'circle', 'usdc', 'official'])
 
 interface Props {
   address: string
@@ -19,9 +20,10 @@ export function AliasModal({ address, onClose, onClaimed }: Props) {
   const [serverErr, setServerErr]   = useState('')
   const [done, setDone]             = useState(false)
 
-  const alias   = input.toLowerCase()
-  const valid   = ALIAS_RE.test(alias)
-  const { available, checking } = useAliasAvailability(valid ? alias : '')
+  const alias    = input.toLowerCase().trim()
+  const valid    = ALIAS_RE.test(alias)
+  const reserved = RESERVED.has(alias)
+  const { available, checking } = useAliasAvailability(valid && !reserved ? alias : '')
 
   if (!supabaseAvailable) {
     return (
@@ -53,7 +55,8 @@ export function AliasModal({ address, onClose, onClaimed }: Props) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!valid || !available || submitting) return
+    if (!valid || reserved || !available || submitting) return
+    if (reserved) { setServerErr('That alias is reserved'); return }
     setServerErr('')
     setSubmitting(true)
     const err = await claimAlias(alias, address, (msg) => signMessageAsync({ message: msg }))
@@ -66,27 +69,34 @@ export function AliasModal({ address, onClose, onClaimed }: Props) {
       <form onSubmit={handleSubmit} className="flex flex-col gap-4 p-6">
         <h2 className="text-base font-semibold text-[var(--ink)]">Choose your alias</h2>
         <p className="text-xs text-[var(--muted)]">
-          3–20 characters, a–z, 0–9, underscore. Signing a message proves ownership of your wallet — no on-chain transaction needed.
+          3–20 characters: a–z, 0–9 or underscore. Reserved words (admin, potly, arc, …) are not allowed.
+          Signing a message proves ownership of your wallet — no on-chain transaction needed.
         </p>
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-2 bg-[var(--surface-muted)] border border-[var(--border)] rounded-xl px-3 py-2.5">
             <span className="text-[var(--muted)] text-sm">@</span>
             <input
               value={input}
-              onChange={e => { setInput(e.target.value.replace(/[^a-z0-9_]/gi, '')); setServerErr('') }}
+              onChange={e => {
+                // Lowercase + strip non-allowed chars + strip spaces as you type
+                setInput(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))
+                setServerErr('')
+              }}
               placeholder="yourname"
               maxLength={20}
+              autoCapitalize="none"
               className="bg-transparent flex-1 text-sm outline-none text-[var(--ink)]"
             />
-            {valid && checking && <Loader2 size={12} className="animate-spin text-[var(--muted)]" />}
-            {valid && !checking && available === true  && <CheckCircle size={12} className="text-[var(--success)]" />}
-            {valid && !checking && available === false && <AlertCircle size={12} className="text-[var(--danger)]" />}
+            {valid && !reserved && checking && <Loader2 size={12} className="animate-spin text-[var(--muted)]" />}
+            {valid && !reserved && !checking && available === true  && <CheckCircle size={12} className="text-[var(--success)]" />}
+            {((!valid && input.length > 0) || reserved || (!checking && available === false)) && <AlertCircle size={12} className="text-[var(--danger)]" />}
           </div>
-          {valid && !checking && available === false && (
-            <p className="text-xs text-[var(--danger)]">Alias taken</p>
+          {reserved && <p className="text-xs text-[var(--danger)]">That alias is reserved</p>}
+          {!reserved && valid && !checking && available === false && (
+            <p className="text-xs text-[var(--danger)]">Alias is already taken</p>
           )}
-          {!valid && input.length > 0 && (
-            <p className="text-xs text-[var(--muted)]">3–20 chars, a–z 0–9 _</p>
+          {!valid && !reserved && input.length > 0 && (
+            <p className="text-xs text-[var(--muted)]">Alias must be 3-20 characters: a-z, 0-9 or underscore</p>
           )}
         </div>
         {serverErr && (
@@ -104,7 +114,7 @@ export function AliasModal({ address, onClose, onClaimed }: Props) {
           </button>
           <button
             type="submit"
-            disabled={!valid || !available || submitting}
+            disabled={!valid || reserved || !available || submitting}
             className="flex-1 rounded-xl px-4 py-2.5 text-sm font-semibold bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
           >
             {submitting && <Loader2 size={12} className="animate-spin" />}

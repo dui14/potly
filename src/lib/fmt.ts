@@ -1,7 +1,40 @@
 /**
  * Shared formatting helpers.
  * All amounts are displayed as USDC, never with a "$" prefix.
+ * All date/time output is forced to en-US to avoid locale-dependent labels
+ * (e.g. Vietnamese "thg 10" from system locale).
  */
+
+const DATE_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'short', day: 'numeric', year: 'numeric',
+  hour: 'numeric', minute: '2-digit',
+})
+
+/** Full date + time in en-US, e.g. "Oct 28, 2026, 6:24 AM" */
+export function formatDateTime(date: Date | string | number): string {
+  const d = date instanceof Date ? date : new Date(typeof date === 'number' ? date * 1000 : date)
+  if (isNaN(d.getTime())) return '—'
+  return DATE_FMT.format(d)
+}
+
+/**
+ * Relative time ("5 min ago", "just now") up to 48 h,
+ * then falls back to formatDateTime.
+ * Adds a title tooltip with the full date.
+ */
+export function fmtRelative(date: Date | string | number, nowMs = Date.now()): { text: string; title: string } {
+  const d = date instanceof Date ? date : new Date(typeof date === 'number' ? date * 1000 : date)
+  if (isNaN(d.getTime())) return { text: '—', title: '' }
+  const diffSec = Math.floor((nowMs - d.getTime()) / 1000)
+  const full = DATE_FMT.format(d)
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const title = `${full} (${tz})`
+  if (diffSec < 60) return { text: 'just now', title }
+  if (diffSec < 3600) return { text: `${Math.floor(diffSec / 60)} min ago`, title }
+  if (diffSec < 86400) return { text: `${Math.floor(diffSec / 3600)} hr ago`, title }
+  if (diffSec < 172800) return { text: `${Math.floor(diffSec / 86400)} day ago`, title }
+  return { text: full, title }
+}
 
 /** Format a 6-decimal USDC bigint as "1,234.56" (no $ sign, no USDC suffix). */
 export function fmtUsdc(raw: bigint): string {

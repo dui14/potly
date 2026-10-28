@@ -15,6 +15,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { verifyMessage, isAddress } from 'viem'
 
 const ALIAS_RE       = /^[a-z0-9_]{3,20}$/
+const RESERVED       = new Set(['admin', 'support', 'potly', 'treasury', 'arc', 'circle', 'usdc', 'official'])
 const SB_URL         = process.env.SUPABASE_URL
 const SERVICE_KEY    = process.env.SUPABASE_SERVICE_ROLE_KEY
 
@@ -45,9 +46,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ ok: false, error: 'Missing fields' })
     if (!isAddress(address))
       return res.status(400).json({ ok: false, error: 'Invalid address' })
-    if (!ALIAS_RE.test(newAlias.toLowerCase()))
-      return res.status(400).json({ ok: false, error: 'Invalid alias format (3–20 chars, a-z 0-9 _)' })
-    if (oldAlias.toLowerCase() === newAlias.toLowerCase())
+    const newLcN = newAlias.trim().toLowerCase()
+    if (!ALIAS_RE.test(newLcN))
+      return res.status(400).json({ ok: false, error: 'Alias must be 3-20 characters: a-z, 0-9 or underscore' })
+    if (RESERVED.has(newLcN))
+      return res.status(400).json({ ok: false, error: 'That alias is reserved' })
+    if (oldAlias.toLowerCase() === newLcN)
       return res.status(400).json({ ok: false, error: 'New alias must differ from old alias' })
 
     // issuedAt within 5 minutes
@@ -56,12 +60,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ ok: false, error: 'issuedAt is too old (max 5 minutes)' })
 
     // Verify signature
-    const message = `Potly alias update\nOld: ${oldAlias.toLowerCase()}\nNew: ${newAlias.toLowerCase()}\nWallet: ${address}\nIssued: ${issuedAt}`
+    const message = `Potly alias update\nOld: ${oldAlias.toLowerCase()}\nNew: ${newLcN}\nWallet: ${address}\nIssued: ${issuedAt}`
     const valid = await verifyMessage({ address: address as `0x${string}`, message, signature: signature as `0x${string}` }).catch(() => false)
     if (!valid) return res.status(400).json({ ok: false, error: 'Invalid signature' })
 
     const lc = address.toLowerCase()
-    const newLc = newAlias.toLowerCase()
 
     // Check current profile owns oldAlias
     const profiles = await sbFetch(`/profiles?wallet_address=eq.${lc}&select=alias,updated_at&limit=1`, 'GET') as { alias: string; updated_at: string | null }[]
@@ -76,13 +79,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // New alias not taken
-    const existing = await sbFetch(`/profiles?alias=eq.${encodeURIComponent(newLc)}&select=wallet_address&limit=1`, 'GET') as { wallet_address: string }[]
+    const existing = await sbFetch(`/profiles?alias=eq.${encodeURIComponent(newLcN)}&select=wallet_address&limit=1`, 'GET') as { wallet_address: string }[]
     if (existing.length > 0 && existing[0].wallet_address !== lc)
-      return res.status(409).json({ ok: false, error: 'Alias taken' })
+      return res.status(409).json({ ok: false, error: 'Alias is already taken' })
 
     // New alias not in alias_history for a different wallet within 30 days
     const since30 = new Date(Date.now() - 30 * 86_400_000).toISOString()
-    const hist = await sbFetch(`/alias_history?alias=eq.${encodeURIComponent(newLc)}&released_at=gte.${since30}&select=wallet_address&limit=1`, 'GET') as { wallet_address: string }[]
+    const hist = await sbFetch(`/alias_history?alias=eq.${encodeURIComponent(newLcN)}&released_at=gte.${since30}&select=wallet_address&limit=1`, 'GET') as { wallet_address: string }[]
     if (hist.length > 0 && hist[0].wallet_address !== lc)
       return res.status(409).json({ ok: false, error: 'Alias recently used by another wallet' })
 
@@ -91,11 +94,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Update profile
     await sbFetch(`/profiles?wallet_address=eq.${lc}`, 'PATCH', {
-      alias: newLc,
+      alias: newLcN,
       updated_at: new Date().toISOString(),
     })
 
-    return res.status(200).json({ ok: true, alias: newLc })
+    return res.status(200).json({ ok: true, alias: newLcN })
   } catch (err) {
     return res.status(500).json({ ok: false, error: 'Internal server error' })
   }

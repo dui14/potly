@@ -24,7 +24,7 @@ export function PotPage() {
   const chainTime = useChainTime()
   const meta = usePotMeta(TARGET_CHAIN_ID, potId)
   const title = meta.title
-  const { events, aliases: actAliases, syncTx, triggerRefresh, error } = useActivity(potId)
+  const { events, aliases: actAliases, syncTx, refresh, error } = useActivity(potId, pot?.raised)
 
   const [recipientAlias, setRecipientAlias] = useState<string | null>(null)
   useEffect(() => {
@@ -68,7 +68,7 @@ export function PotPage() {
     ? `@${recipientAlias} (${formatAddress(pot.recipient)})`
     : formatAddress(pot.recipient)
 
-  const handleAction = () => { refetch(); triggerRefresh() }
+  const handleAction = () => { refetch(); void refresh() }
 
   return (
     <main className="max-w-[1120px] mx-auto px-4 py-8">
@@ -124,7 +124,7 @@ export function PotPage() {
             events={events}
             aliases={actAliases}
             activityError={error}
-            onRefresh={triggerRefresh}
+            onRefresh={refresh}
           />
             </section>
           )}
@@ -138,6 +138,7 @@ export function PotPage() {
               events={events}
               aliases={actAliases}
               chainTime={chainTime}
+              onRefresh={refresh}
             />
           </section>
 

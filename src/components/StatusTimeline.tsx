@@ -7,6 +7,7 @@
 import { ExternalLink } from 'lucide-react'
 import { buildTxUrl } from '@/config/wagmi'
 import { formatAddress } from '@/lib/utils'
+import { formatDateTime } from '@/lib/fmt'
 import type { PotData } from '@/hooks/usePot'
 import type { PotEvent } from '@/hooks/useActivity'
 
@@ -16,13 +17,17 @@ interface Props {
   events: PotEvent[]
   aliases: Record<string, string>
   chainTime: bigint
+  onRefresh?: () => void
 }
 
-function fmtTs(unixSec: number): string {
-  if (!unixSec) return '—'
-  return new Date(unixSec * 1000).toLocaleString(undefined, {
-    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-  })
+/**
+ * Format a block_time value which may be an ISO string (from the API)
+ * or a unix-seconds number (from chain data e.g. pot.filledAt).
+ */
+function fmtTs(isoOrUnix: string | number | bigint): string {
+  if (!isoOrUnix) return '—'
+  if (typeof isoOrUnix === 'string') return formatDateTime(isoOrUnix)
+  return formatDateTime(new Date(Number(isoOrUnix) * 1000))
 }
 function fmtUsdc(raw: string | bigint): string {
   const n = Number(BigInt(String(raw))) / 1_000_000
@@ -37,7 +42,7 @@ const DOT = 'w-2 h-2 rounded-full bg-[var(--accent)] mt-1 shrink-0'
 const DONE_DOT = 'w-2 h-2 rounded-full bg-[var(--success)] mt-1 shrink-0'
 const FADE_DOT = 'w-2 h-2 rounded-full bg-[var(--subtle)] mt-1 shrink-0'
 
-export function StatusTimeline({ pot, events, aliases, chainTime }: Props) {
+export function StatusTimeline({ pot, events, aliases, chainTime, onRefresh }: Props) {
   const createdEvt  = events.find(e => e.kind === 'created')
   const filledEvt   = events.find(e => e.kind === 'filled')
   const payoutEvt   = events.find(e => e.kind === 'payout')
@@ -51,12 +56,18 @@ export function StatusTimeline({ pot, events, aliases, chainTime }: Props) {
 
   const steps: React.ReactNode[] = []
 
-  // Created
+  // Created: use event when available; if missing but pot exists, show "Syncing..."
   steps.push(
     <Step key="created" dot={<span className={DONE_DOT} />}
       label="Created"
-      time={createdEvt ? fmtTs(createdEvt.block_time) : '—'}
-      sub={createdEvt ? <a href={buildTxUrl(createdEvt.tx_hash)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[var(--muted)] hover:text-[var(--ink)] text-xs">tx <ExternalLink size={10} /></a> : null}
+      time={createdEvt ? fmtTs(createdEvt.block_time) : 'Syncing…'}
+      sub={
+        createdEvt
+          ? <a href={buildTxUrl(createdEvt.tx_hash)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[var(--muted)] hover:text-[var(--ink)] text-xs">tx <ExternalLink size={10} /></a>
+          : onRefresh
+            ? <button onClick={onRefresh} className="text-xs text-[var(--accent)] hover:underline">Refresh</button>
+            : null
+      }
     />,
   )
 

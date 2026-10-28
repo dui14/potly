@@ -1,5 +1,5 @@
 /**
- * Unit tests for API shared helpers.
+ * Unit tests forr API shared helpers.
  * Focused on the two confirmed bugs:
  *   1. sbPost treating HTTP 200 as an error (PostgREST ignore-duplicates response)
  *   2. wallets/pots endpoint returning empty when Supabase index is behind
@@ -157,3 +157,39 @@ function afterAll(fn: () => void) {
     ;(globalThis as unknown as { afterAll: (fn: () => void) => void }).afterAll(fn)
   }
 }
+
+// ── A1: block_time ISO conversion ─────────────────────────────────────────────
+
+describe('toIso — block timestamp to ISO 8601', () => {
+  // Import inline to avoid module-level side-effects on env vars
+  it('converts the sample unix timestamp 1793184294 correctly', async () => {
+    // This is the timestamp that caused Postgres error 22008 when written raw.
+    const { toIso } = await import('../_shared')
+    const result = toIso(1793184294)
+    // Must be a valid Date (timezone-agnostic: round-trip the unix seconds)
+    expect(isNaN(new Date(result).getTime())).toBe(false)
+    expect(Math.round(new Date(result).getTime() / 1000)).toBe(1793184294)
+    // Must end with Z (UTC / ISO 8601)
+    expect(result.endsWith('Z')).toBe(true)
+  })
+
+  it('is safe with BigInt input', async () => {
+    const { toIso } = await import('../_shared')
+    const result = toIso(1793184294n)
+    expect(isNaN(new Date(result).getTime())).toBe(false)
+    expect(Math.round(new Date(result).getTime() / 1000)).toBe(1793184294)
+    expect(result.endsWith('Z')).toBe(true)
+  })
+
+  it('round-trips: toIso output is accepted by new Date()', async () => {
+    const { toIso } = await import('../_shared')
+    const samples = [0, 1000000000, 1793184294, 2000000000]
+    for (const ts of samples) {
+      const iso = toIso(ts)
+      const parsed = new Date(iso)
+      expect(isNaN(parsed.getTime())).toBe(false)
+      // round-trip: unix seconds should match
+      expect(Math.round(parsed.getTime() / 1000)).toBe(ts)
+    }
+  })
+})

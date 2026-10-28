@@ -14,6 +14,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { verifyMessage, isAddress } from 'viem'
 
 const ALIAS_RE = /^[a-z0-9_]{3,20}$/
+const RESERVED = new Set(['admin', 'support', 'potly', 'treasury', 'arc', 'circle', 'usdc', 'official'])
 
 const SUPABASE_URL       = process.env.SUPABASE_URL
 const SERVICE_ROLE_KEY   = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -43,9 +44,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     alias?: string; address?: string; issuedAt?: string; signature?: string
   }
 
-  // Validate inputs
-  if (!alias || !ALIAS_RE.test(alias.toLowerCase()))
-    return res.status(400).json({ error: 'Invalid alias (3–20 chars, a–z 0–9 _)' })
+  // Validate inputs — normalize first
+  const aliasLc = (alias ?? '').trim().toLowerCase()
+  if (!aliasLc || !ALIAS_RE.test(aliasLc))
+    return res.status(400).json({ error: 'Alias must be 3-20 characters: a-z, 0-9 or underscore' })
+  if (RESERVED.has(aliasLc))
+    return res.status(400).json({ error: 'That alias is reserved' })
   if (!address || !isAddress(address))
     return res.status(400).json({ error: 'Invalid address' })
   if (!issuedAt || !signature)
@@ -57,7 +61,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: 'issuedAt is too old (max 5 minutes)' })
 
   // Verify signature
-  const message = `Potly alias claim\nAlias: ${alias.toLowerCase()}\nWallet: ${address}\nIssued: ${issuedAt}`
+  const message = `Potly alias claim\nAlias: ${aliasLc}\nWallet: ${address}\nIssued: ${issuedAt}`
   const valid = await verifyMessage({ address: address as `0x${string}`, message, signature: signature as `0x${string}` })
     .catch(() => false)
   if (!valid) return res.status(400).json({ error: 'Invalid signature' })
@@ -65,21 +69,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Insert
   const { error } = await sbAdminFetch('/profiles', {
     wallet_address: address.toLowerCase(),
-    alias: alias.toLowerCase(),
+    alias: aliasLc,
   })
 
   if (error) {
-    // Postgres unique constraint violations
-    if (error.code === '23505') {
+    const code = error.code ?? ''
+    console.error(`[profile POST] pg=${code}`)
+    if (code === '23505') {
       const msg = (error.message ?? '').toLowerCase()
-      if (msg.includes('alias')) return res.status(409).json({ error: 'Alias taken' })
-      if (msg.includes('wallet')) return res.status(409).json({ error: 'Wallet already has an alias' })
-      return res.status(409).json({ error: 'Conflict' })
+      if (msg.includes('alias')) return res.status(409).json({ error: 'Alias is already taken' })
+      if (msg.includes('wallet')) return res.status(409).json({ error: 'This wallet already has an alias' })
+      return res.status(409).json({ error: 'Alias is already taken' })
     }
-    return res.status(500).json({ error: 'Database error' })
+    if (code === '23514') return res.status(400).json({ error: 'That alias is not allowed' })
+    return res.status(500).json({ error: `Request failed (code: ${code || 'unknown'})` })
   }
 
-  return res.status(201).json({ ok: true, alias: alias.toLowerCase() })
+  return res.status(201).json({ ok: true, alias: aliasLc })
   } catch (err) {
     return res.status(500).json({ ok: false, error: 'Internal server error' })
   }

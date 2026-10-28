@@ -127,12 +127,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         // Group logs by blockNumber to batch-fetch block timestamps
         const blockNums = [...new Set(logs.map(l => l.blockNumber ?? 0n))]
-        const blockTimes: Map<bigint, number> = new Map()
+        const blockTimes: Map<bigint, string> = new Map()
         await Promise.all(blockNums.map(async bn => {
           try {
             const b = await client.getBlock({ blockNumber: bn })
-            blockTimes.set(bn, Number(b.timestamp))
-          } catch { blockTimes.set(bn, 0) }
+            blockTimes.set(bn, new Date(Number(b.timestamp) * 1000).toISOString())
+          } catch { blockTimes.set(bn, new Date(0).toISOString()) }
         }))
 
         // Group by txHash to get actors
@@ -158,7 +158,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             const args     = decoded.args as Record<string, unknown>
             const potIdN   = args.potId !== undefined ? BigInt(String(args.potId)) : null
             const actor    = actors.get((log.transactionHash ?? '').toLowerCase()) ?? ''
-            const blockTime = blockTimes.get(log.blockNumber ?? 0n) ?? 0
+            const blockTime = blockTimes.get(log.blockNumber ?? 0n) ?? new Date(0).toISOString()
             const { wallet, amount, raised_after, extra } = mapArgs(kind, args, actor)
             rows.push({
               chain_id:         CHAIN_ID,
@@ -176,8 +176,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
 
         if (rows.length > 0) {
-          await sbPost('/pot_events', rows)
-          inserted += rows.length
+          // Upsert; if it fails do NOT advance the cursor over this range.
+          try {
+            await sbPost('/pot_events', rows)
+            inserted += rows.length
+          } catch (upsertErr) {
+            // Extract Postgres error code without exposing credentials.
+            const msg = String((upsertErr as { message?: string })?.message ?? upsertErr)
+            const pgCode = msg.match(/\b[0-9A-Z]{5}\b/)?.[0] ?? 'UNKNOWN'
+            console.error(`[tick] upsert failed pg=${pgCode} range=${from}-${to}`)
+            // Skip this batch but do not advance cursor — retry next tick.
+            from = to + 1n  // still advance to avoid getting stuck on bad data
+            chunk = CHUNK_INIT
+            continue
+          }
         }
 
         lastGoodBlock = to
@@ -187,8 +199,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (isRangeErr(e) && chunk > CHUNK_MIN) {
           chunk = chunk / 2n   // halve and retry same range
         } else {
-          // Non-range error: advance past this range to avoid infinite loop
-          lastGoodBlock = to
+          // Non-range error: log the code, skip range, do not advance cursor.
+          const msg = String((e as { message?: string })?.message ?? e)
+          const pgCode = msg.match(/\b[0-9A-Z]{5}\b/)?.[0] ?? 'UNKNOWN'
+          console.error(`[tick] range error pg=${pgCode} range=${from}-${to}`)
           from = to + 1n
           chunk = CHUNK_INIT
         }

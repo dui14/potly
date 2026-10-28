@@ -49,17 +49,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ── GET activity ────────────────────────────────────────────────────────
     if (req.method === 'GET') {
       if (!SB_URL || !SB_KEY) return res.status(503).json({ ok: false, error: 'Supabase not configured' })
+
+      // Pagination params: limit (default 20, max 100), before=<blockNumber>:<logIndex>
+      const rawLimit = Number(req.query.limit ?? 20)
+      const limit    = Math.min(Math.max(1, isFinite(rawLimit) ? rawLimit : 20), 100)
+      const fetch1   = limit + 1   // fetch one extra to detect hasMore
+
+      let beforeFilter = ''
+      const beforeParam = req.query.before as string | undefined
+      if (beforeParam) {
+        const [bn, li] = beforeParam.split(':').map(Number)
+        if (isFinite(bn) && isFinite(li)) {
+          // Events strictly before this (block_number, log_index) — newest-first
+          beforeFilter = `&or=(block_number.lt.${bn},and(block_number.eq.${bn},log_index.lt.${li}))`
+        }
+      }
+
       const events = await sbGet(
         `/pot_events?chain_id=eq.${chainIdN}&contract_address=eq.${POTLY_ADDRESS}&pot_id=eq.${potIdN.toString()}` +
         `&select=kind,wallet,actor,amount,raised_after,extra,tx_hash,block_number,block_time,log_index` +
-        `&order=block_number.asc,log_index.asc&limit=200`,
+        `&order=block_number.desc,log_index.desc&limit=${fetch1}${beforeFilter}`,
       ) as { wallet: string }[]
 
-      const wallets = [...new Set(events.map(e => e.wallet).filter(Boolean))]
-      const aliases = await getAliasMap(wallets)
+      const hasMore  = events.length > limit
+      const page     = hasMore ? events.slice(0, limit) : events
+      const wallets  = [...new Set(page.map((e: { wallet: string }) => e.wallet).filter(Boolean))]
+      const aliases  = await getAliasMap(wallets)
 
       res.setHeader('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=30')
-      return res.status(200).json({ ok: true, events, aliases })
+      return res.status(200).json({ ok: true, events: page, hasMore, aliases })
     }
 
     // ── POST sync ───────────────────────────────────────────────────────────

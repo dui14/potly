@@ -118,8 +118,13 @@ export interface DecodedEvent {
   extra:        Record<string, string>
   log_index:    number
   block_number: number
-  block_time:   number
+  block_time:   string   // ISO 8601 — Postgres timestamptz column
   tx_hash:      string   // lowercase
+}
+
+/** Convert a chain block timestamp (unix seconds) to ISO 8601. */
+export function toIso(unixSeconds: number | bigint): string {
+  return new Date(Number(unixSeconds) * 1000).toISOString()
 }
 
 /**
@@ -192,7 +197,7 @@ export async function decodeReceiptLogs(
   ])
   const actor    = tx.from.toLowerCase()
   const block    = await client.getBlock({ blockNumber: receipt.blockNumber })
-  const blockTime = Number(block.timestamp)
+  const blockTime = toIso(block.timestamp)
   const blockNum  = Number(receipt.blockNumber)
 
   const out: DecodedEvent[] = []
@@ -231,7 +236,7 @@ export async function decodeReceiptLogs(
 export async function decodeRawLog(
   log: { address: string; data: `0x${string}`; topics: readonly `0x${string}`[]; logIndex: number | null; blockNumber: bigint | null; transactionHash: `0x${string}` | null },
   contractAddress: string,
-  blockTime: number,
+  blockTime: string,   // ISO 8601
   actor: string,
 ): Promise<DecodedEvent | null> {
   if ((log.address as string).toLowerCase() !== contractAddress) return null

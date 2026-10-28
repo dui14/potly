@@ -1,61 +1,73 @@
 /**
- * useActivity — polls GET .../activity every 15 s, triggers refresh on mount,
- * and exposes a syncTx(txHash) helper to call after a confirmed transaction.
+ * useActivity
+ *
+ * - Calls POST /api/v1/index/tick at most once per 15 s per tab.
+ * - Polls GET .../activity every 15 s.
+ * - syncTx(hash): POST .../sync then re-fetch.
  */
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { TARGET_CHAIN_ID, POTLY_ADDRESS } from '@/config/wagmi'
 
 export interface PotEvent {
   kind: 'created' | 'deposit' | 'withdraw' | 'filled' | 'payout' | 'cancelled'
-  wallet: string
-  actor: string
-  amount: string
+  wallet:      string
+  actor:       string
+  amount:      string
   raised_after: string
-  extra: Record<string, string>
-  tx_hash: string
+  extra:       Record<string, unknown>
+  tx_hash:     string
   block_number: number
-  block_time: number
-  log_index: number
+  block_time:  number
+  log_index:   number
 }
 
 interface ActivityState {
-  events: PotEvent[]
+  events:  PotEvent[]
   aliases: Record<string, string>
   loading: boolean
-  error: string | null
+  error:   string | null
 }
 
-const POLL_MS = 15_000
-const contract = POTLY_ADDRESS.toLowerCase()
+const POLL_MS    = 15_000
+const TICK_MS    = 15_000
+
+void POTLY_ADDRESS  // referenced only for type narrowing in the URL
 
 export function useActivity(potId: bigint | undefined) {
-  const [state, setState] = useState<ActivityState>({ events: [], aliases: {}, loading: false, error: null })
-  const refreshThrottle = useRef(0)
+  const [state, setState] = useState<ActivityState>({
+    events: [], aliases: {}, loading: false, error: null,
+  })
+  const tickThrottle = useRef(0)
 
+  // ── Fetch activity events ───────────────────────────────────────────────
   const fetchActivity = useCallback(async () => {
     if (potId === undefined) return
     setState(s => ({ ...s, loading: true, error: null }))
     try {
-      const res = await fetch(`/api/v1/pots/${TARGET_CHAIN_ID}/${potId}/sync`)
-      if (!res.ok) { setState(s => ({ ...s, loading: false })); return }
-      const data = await res.json() as { events?: PotEvent[]; aliases?: Record<string, string> }
+      const r = await fetch(`/api/v1/pots/${TARGET_CHAIN_ID}/${potId}/activity`)
+      if (!r.ok) { setState(s => ({ ...s, loading: false })); return }
+      const data = await r.json() as { events?: PotEvent[]; aliases?: Record<string, string> }
       setState({ events: data.events ?? [], aliases: data.aliases ?? {}, loading: false, error: null })
     } catch {
       setState(s => ({ ...s, loading: false, error: 'Could not load activity' }))
     }
   }, [potId?.toString()])
 
-  const triggerRefresh = useCallback(async () => {
-    if (potId === undefined) return
+  // ── Trigger global indexer tick ─────────────────────────────────────────
+  const triggerTick = useCallback(async () => {
     const now = Date.now()
-    if (now - refreshThrottle.current < 5_000) return
-    refreshThrottle.current = now
-    try {
-      await fetch(`/api/v1/pots/${TARGET_CHAIN_ID}/${potId}/refresh`, { method: 'POST' })
-      await fetchActivity()
-    } catch { /* ok */ }
-  }, [potId?.toString(), fetchActivity])
+    if (now - tickThrottle.current < TICK_MS) return
+    tickThrottle.current = now
+    try { await fetch('/api/v1/index/tick', { method: 'POST' }) } catch { /* ok */ }
+  }, [])
 
+  // ── Refresh: tick + re-fetch ────────────────────────────────────────────
+  const triggerRefresh = useCallback(async () => {
+    await triggerTick()
+    await fetchActivity()
+  }, [triggerTick, fetchActivity])
+
+  // ── Sync a specific tx ──────────────────────────────────────────────────
   const syncTx = useCallback(async (txHash: string) => {
     if (potId === undefined) return
     try {
@@ -68,16 +80,14 @@ export function useActivity(potId: bigint | undefined) {
     } catch { /* ok */ }
   }, [potId?.toString(), fetchActivity])
 
-  // Initial load: refresh then poll
+  // ── Mount: tick + poll ──────────────────────────────────────────────────
   useEffect(() => {
     if (potId === undefined) return
-    triggerRefresh()
+    void triggerRefresh()
     const id = setInterval(fetchActivity, POLL_MS)
     return () => clearInterval(id)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [potId?.toString()])
 
   return { ...state, syncTx, triggerRefresh }
 }
-
-// Suppress unused import — contract is referenced in comments
-void contract

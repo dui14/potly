@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react'
-import { useAccount, useWriteContract, useSwitchChain, useSimulateContract, useWaitForTransactionReceipt } from 'wagmi'
-import { erc20Abi } from 'viem'
+import { useState, useEffect, useCallback } from 'react'
+import {
+  useAccount, useWriteContract, useSwitchChain,
+  useSimulateContract, useWaitForTransactionReceipt,
+} from 'wagmi'
+import { erc20Abi, parseAbiItem, decodeEventLog } from 'viem'
 import { Loader2, CheckCircle, AlertCircle, ExternalLink } from 'lucide-react'
 import { POTLY_ABI } from '@/lib/potlyAbi'
 import { POTLY_ADDRESS, USDC_ADDRESS, TARGET_CHAIN_ID, IS_TESTNET, buildTxUrl } from '@/config/wagmi'
@@ -9,6 +12,7 @@ import { useGasPrice } from '@/hooks/useGasPrice'
 import { useUsdcBalance, useUsdcAllowance } from '@/hooks/useUsdcBalance'
 import { useRemaining } from '@/hooks/usePot'
 import { decodePotlyError } from '@/lib/errors'
+import { fmtUsdc, fmtGasNative, usdc6ToWei } from '@/lib/fmt'
 import type { PotData } from '@/hooks/usePot'
 
 type Step = 'idle' | 'approving' | 'signing' | 'confirming' | 'success' | 'error'
@@ -19,9 +23,9 @@ interface Props {
   onSuccess: () => void
 }
 
-function fmt(raw: bigint) {
-  return (Number(raw) / 1_000_000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
+const DepositedAbi = parseAbiItem(
+  'event Deposited(uint256 indexed potId, address indexed depositor, uint256 accepted, uint256 raised)',
+)
 
 export function ContributePanel({ potId, pot, onSuccess }: Props) {
   const { address, chainId } = useAccount()
@@ -30,9 +34,8 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
   const gasPrice             = useGasPrice()
   const { balance, refetch: refetchBal } = useUsdcBalance(address)
   const { allowance, refetch: refetchAllow } = useUsdcAllowance(address, POTLY_ADDRESS)
-  const rem                  = useRemaining(potId)
+  const rem = useRemaining(potId)
 
-  // suggested share = target / slots
   const sugg = pot.slots > 0n ? pot.target / pot.slots : 0n
   const [rawInput, setRawInput] = useState('')
   const [step, setStep]         = useState<Step>('idle')
@@ -43,34 +46,38 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
 
   const wrongChain = chainId !== TARGET_CHAIN_ID
 
-  // Parse input
-  const parsedInput = (() => {
+  // Parse input — 6 decimal places max
+  const parsedInput: bigint = (() => {
+    if (!rawInput) return 0n
     const n = parseFloat(rawInput.replace(/,/g, ''))
     if (isNaN(n) || n <= 0) return 0n
     return BigInt(Math.round(n * 1_000_000))
   })()
 
-  // Cap at remaining
-  const capped = parsedInput > rem ? rem : parsedInput
-  const isOvercapped = parsedInput > rem && rem > 0n
+  // The amount we will actually submit: if input exceeds remaining, cap at remaining
+  // and SHOW the user what they'll be charged (so approval = charged amount).
+  const chargeAmount = parsedInput > rem ? rem : parsedInput
+  const isOverRem    = parsedInput > rem && rem > 0n
 
   // Gas estimates
-  const approveGas  = estimatedGasUsdc6('approve', gasPrice)
-  const depositGas  = estimatedGasUsdc6('deposit', gasPrice)
-  const totalCost   = capped + approveGas + depositGas
+  const approveGas = estimatedGasUsdc6('approve', gasPrice)
+  const depositGas = estimatedGasUsdc6('deposit', gasPrice)
 
-  // Simulate deposit to catch errors before submit
-  const needsApprove = allowance < capped
+  // After every confirmed tx refetch allowance so needsApprove is fresh
+  const needsApprove = allowance < chargeAmount
+
+  // Simulate deposit ONLY after allowance is confirmed sufficient
+  // (simulating before approval always reverts because the contract checks transferFrom)
   const { error: simError } = useSimulateContract({
     address: POTLY_ADDRESS,
     abi: POTLY_ABI,
     functionName: 'deposit',
-    args: capped > 0n && address ? [potId, capped] : undefined,
+    args: chargeAmount > 0n && address ? [potId, chargeAmount] : undefined,
     chainId: TARGET_CHAIN_ID,
-    query: { enabled: capped > 0n && !!address && !needsApprove },
+    query: { enabled: chargeAmount > 0n && !!address && !needsApprove },
   })
 
-  const simBlocked = !!simError && !needsApprove && capped > 0n
+  const simBlocked = !!simError && !needsApprove && chargeAmount > 0n
   const simErrMsg  = simBlocked ? decodePotlyError(simError) : null
 
   // Wait for tx receipt
@@ -82,22 +89,41 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
   useEffect(() => {
     if (!isSuccess || !receipt || step !== 'confirming') return
     if (receipt.status === 'success') {
-      // actual gas from receipt
-      const gasUsed    = receipt.gasUsed ?? 0n
-      const gasPrice_  = receipt.effectiveGasPrice ?? 0n
-      const gasCost18  = gasUsed * gasPrice_
-      const gasCost6   = gasCost18 / 1_000_000_000_000n
-      setActualGas(`$${fmt(gasCost6)}`)
-      // actual charged = capped (contract never over-pulls)
-      setActualCharged(capped)
+      // Read actual accepted amount from the Deposited event
+      let accepted = chargeAmount
+      for (const log of receipt.logs) {
+        try {
+          const decoded = decodeEventLog({ abi: [DepositedAbi], data: log.data, topics: log.topics })
+          if (decoded.eventName === 'Deposited') {
+            accepted = (decoded.args as { accepted: bigint }).accepted
+            break
+          }
+        } catch { /* not this event */ }
+      }
+      const gasWei = (receipt.gasUsed ?? 0n) * (receipt.effectiveGasPrice ?? 0n)
+      setActualGas(fmtGasNative(gasWei))
+      setActualCharged(accepted)
       setStep('success')
-      refetchBal()
+      // Invalidate everything — stale allowance is the root cause of re-deposit failures
+      void refetchBal()
+      void refetchAllow()
       onSuccess()
     } else {
       setStep('error')
       setErrMsg('Transaction reverted on-chain.')
     }
-  }, [isSuccess, receipt, step, capped, refetchBal, onSuccess])
+  }, [isSuccess, receipt])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset form when remaining changes (pot updated by another contributor)
+  // but NOT when we're mid-transaction
+  const resetForm = useCallback(() => {
+    if (step === 'success' || step === 'signing' || step === 'approving' || step === 'confirming') return
+    setRawInput('')
+    setErrMsg('')
+    setStep('idle')
+  }, [step])
+
+  useEffect(() => { resetForm() }, [rem.toString()])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const quickBtns = [
     { label: '25%', value: sugg / 4n },
@@ -109,22 +135,24 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
   async function handleSubmit() {
     if (step !== 'idle' && step !== 'error') return
     if (wrongChain) { switchChain({ chainId: TARGET_CHAIN_ID }); return }
+    if (chargeAmount === 0n) return
     setErrMsg('')
     setActualCharged(null)
     setActualGas(null)
 
     try {
+      // Approval uses exact chargeAmount — consumed by the deposit; next deposit
+      // needs a fresh approval, which is why we refetchAllow after success.
       if (needsApprove) {
         setStep('approving')
         await writeContractAsync({
           address: USDC_ADDRESS,
           abi: erc20Abi,
           functionName: 'approve',
-          args: [POTLY_ADDRESS, capped],
+          args: [POTLY_ADDRESS, chargeAmount],
           chainId: TARGET_CHAIN_ID,
         })
         await refetchAllow()
-        // approval done — user sees "approving" resolved, now deposit
       }
 
       setStep('signing')
@@ -132,7 +160,7 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
         address: POTLY_ADDRESS,
         abi: POTLY_ABI,
         functionName: 'deposit',
-        args: [potId, capped],
+        args: [potId, chargeAmount],
         chainId: TARGET_CHAIN_ID,
       })
       setTxHash(hash)
@@ -144,7 +172,23 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
     }
   }
 
-  const canSubmit = capped > 0n && balance >= totalCost && !simBlocked && step === 'idle'
+  // Disabled reason text (A3c)
+  function disabledReason(): string | null {
+    if (wrongChain) return null  // button label already says "Switch to Arc"
+    if (chargeAmount === 0n) return 'Enter a contribution amount'
+    if (balance < chargeAmount + approveGas + depositGas)
+      return `Insufficient USDC (need ~${fmtUsdc(chargeAmount + approveGas + depositGas)} USDC)`
+    if (simBlocked && simErrMsg) return simErrMsg
+    return null
+  }
+
+  const totalGas = approveGas + depositGas
+  const totalCost = chargeAmount + totalGas
+  const canSubmit =
+    chargeAmount > 0n &&
+    balance >= totalCost &&
+    !simBlocked &&
+    (step === 'idle' || step === 'error')
 
   // After success, show receipt
   if (step === 'success' && actualCharged !== null) {
@@ -154,8 +198,8 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
           <CheckCircle size={14} /> Contribution confirmed
         </div>
         <p className="text-sm text-[var(--ink-2)]">
-          Charged: <span className="font-mono">${fmt(actualCharged)} USDC</span>
-          {actualGas && <> · Gas: <span className="font-mono">{actualGas} USDC</span></>}
+          Charged: <span className="font-mono tabular-nums">{fmtUsdc(actualCharged)} USDC</span>
+          {actualGas && <> · Gas: <span className="font-mono tabular-nums">{actualGas} USDC</span></>}
         </p>
         {txHash && (
           <a href={buildTxUrl(txHash)} target="_blank" rel="noopener noreferrer"
@@ -167,35 +211,39 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
     )
   }
 
+  const reason = disabledReason()
+
   return (
     <div className="flex flex-col gap-4">
       {/* Amount input */}
       <div className="flex flex-col gap-2">
         <label className="text-sm font-medium text-[var(--ink-2)]">
           Contribute (USDC)
-          {sugg > 0n && <span className="text-[var(--muted)] font-normal"> · suggested ${fmt(sugg)}</span>}
+          {sugg > 0n && <span className="text-[var(--muted)] font-normal"> · suggested {fmtUsdc(sugg)}</span>}
         </label>
         <div className="flex gap-2 flex-wrap">
           {quickBtns.map(b => b.value > 0n && (
             <button
               key={b.label}
-              onClick={() => setRawInput((Number(b.value) / 1_000_000).toString())}
+              onClick={() => setRawInput((Number(b.value) / 1_000_000).toFixed(6))}
               className="px-3 py-1.5 rounded-lg text-xs font-medium border border-[var(--border)] bg-[var(--surface)] text-[var(--ink-2)] hover:border-[var(--border-strong)] transition"
             >
-              {b.label} {b.label === 'Fill' ? `($${fmt(rem)})` : ''}
+              {b.label}{b.label === 'Fill' ? ` (${fmtUsdc(rem)} USDC)` : ''}
             </button>
           ))}
         </div>
         <input
-          type="number" min="0.01" step="0.01"
+          type="number" min="0.000001" step="0.000001"
           value={rawInput}
-          onChange={e => setRawInput(e.target.value)}
+          onChange={e => { setRawInput(e.target.value); setErrMsg('') }}
           placeholder="0.00"
           className="bg-[var(--surface-muted)] border border-[var(--border)] focus:border-[var(--border-strong)] rounded-xl px-3 py-2.5 text-sm outline-none transition w-full"
         />
-        {isOvercapped && (
-          <p className="text-xs text-amber-400">
-            Only ${fmt(rem)} is still needed — you will be charged at most ${fmt(rem)}.
+        {/* Overcap notice: tell the user exactly what they'll be charged */}
+        {isOverRem && (
+          <p className="text-xs text-amber-400 flex items-start gap-1">
+            <AlertCircle size={11} className="mt-0.5 shrink-0" />
+            Only {fmtUsdc(rem)} USDC is still needed — you will be charged {fmtUsdc(rem)} USDC.
           </p>
         )}
         {simBlocked && simErrMsg && (
@@ -206,12 +254,13 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
       </div>
 
       {/* Summary card */}
-      {capped > 0n && (
+      {chargeAmount > 0n && (
         <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] p-3 flex flex-col gap-1.5 text-xs">
-          <Row label="Pot receives"         value={`$${fmt(capped)} USDC`} />
-          <Row label="Est. network fee"     value={`~$${fmt(approveGas + depositGas)} USDC`} />
-          <Row label="Total deducted ~"     value={`$${fmt(totalCost)} USDC`} strong />
-          <Row label="Balance after ~"      value={`$${fmt(balance > totalCost ? balance - totalCost : 0n)} USDC`} />
+          <Row label="Pot receives"       value={`${fmtUsdc(chargeAmount)} USDC`} />
+          {needsApprove && <Row label="Step 1: Approve" value="Required (exact amount)" />}
+          <Row label="Est. gas"           value={`~${fmtGasNative(usdc6ToWei(totalGas))} USDC`} />
+          <Row label="Total deducted ~"   value={`${fmtUsdc(totalCost)} USDC`} strong />
+          <Row label="Balance after ~"    value={`${fmtUsdc(balance > totalCost ? balance - totalCost : 0n)} USDC`} />
           {!IS_TESTNET && <Row label="" value="Real USDC — mainnet" danger />}
         </div>
       )}
@@ -235,6 +284,13 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
          needsApprove          ? 'Approve & Contribute' : 'Contribute'}
       </button>
 
+      {/* Disabled reason (A3c) */}
+      {!canSubmit && reason && step === 'idle' && (
+        <p className="text-xs text-[var(--subtle)] px-1 flex items-start gap-1">
+          <AlertCircle size={11} className="mt-0.5 shrink-0" /> {reason}
+        </p>
+      )}
+
       {step === 'confirming' && txHash && (
         <a href={buildTxUrl(txHash)} target="_blank" rel="noopener noreferrer"
           className="flex items-center gap-1 text-xs text-[var(--muted)] px-1">
@@ -243,7 +299,7 @@ export function ContributePanel({ potId, pot, onSuccess }: Props) {
       )}
       {step === 'error' && errMsg && (
         <div className="flex items-start gap-1 text-xs text-[var(--danger)]">
-          <AlertCircle size={11} className="mt-0.5 flex-shrink-0" />
+          <AlertCircle size={11} className="mt-0.5 shrink-0" />
           <span>{errMsg}</span>
         </div>
       )}

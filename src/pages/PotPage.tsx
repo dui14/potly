@@ -24,7 +24,7 @@ export function PotPage() {
   const chainTime = useChainTime()
   const meta = usePotMeta(TARGET_CHAIN_ID, potId)
   const title = meta.title
-  const { events, aliases: actAliases, syncTx, triggerRefresh } = useActivity(potId)
+  const { events, aliases: actAliases, syncTx, triggerRefresh, error } = useActivity(potId)
 
   const [recipientAlias, setRecipientAlias] = useState<string | null>(null)
   useEffect(() => {
@@ -87,9 +87,9 @@ export function PotPage() {
           </div>
 
           {/* Recipient */}
-          <div className="text-sm text-[var(--muted)] flex gap-2 items-center">
-            <span>Recipient:</span>
-            <span className="font-mono text-[var(--ink-2)]">{recipientDisplay}</span>
+          <div className="text-sm text-[var(--muted)] flex gap-2 items-start min-w-0">
+            <span className="shrink-0">Recipient:</span>
+            <span className="font-mono text-[var(--ink-2)] break-anywhere min-w-0">{recipientDisplay}</span>
           </div>
 
           {/* Countdown */}
@@ -118,7 +118,14 @@ export function PotPage() {
           {potId !== undefined && (
             <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 flex flex-col gap-3">
               <h3 className="text-xs font-semibold text-[var(--muted)] uppercase tracking-wider">Contributors</h3>
-              <ContributorsList potId={potId} pot={pot} onRefresh={triggerRefresh} />
+              <ContributorsList
+            potId={potId}
+            pot={pot}
+            events={events}
+            aliases={actAliases}
+            activityError={error}
+            onRefresh={triggerRefresh}
+          />
             </section>
           )}
 

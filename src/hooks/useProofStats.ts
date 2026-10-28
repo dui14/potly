@@ -1,75 +1,89 @@
 /**
- * useProofStats — reads potCount, then fetches the newest ≤200 pots via
- * multicall (getPot batches of 50) to compute proof strip stats.
- * Caches the result for 30 seconds.  No getLogs dependency.
+ * useProofStats
+ *
+ * Reads aggregate statistics:
+ *   - potCount from the chain (live, useReadContract)
+ *   - paid, settled, fees from GET /api/v1/stats (cached 60 s server-side)
+ *
+ * Falls back to the old multicall approach when the API is unavailable.
  */
 import { useState, useEffect, useRef } from 'react'
-import { usePublicClient, useReadContract } from 'wagmi'
+import { useReadContract, usePublicClient } from 'wagmi'
 import { POTLY_ABI } from '@/lib/potlyAbi'
 import { POTLY_ADDRESS, TARGET_CHAIN_ID } from '@/config/wagmi'
 
-const MAX_POTS   = 200
+const CACHE_TTL  = 60_000   // ms — mirrors server s-maxage
 const BATCH_SIZE = 50
-const CACHE_TTL  = 30_000   // ms
+const FALLBACK_MAX = 200
+const STATUS_PAID  = 2
 
-interface Stats {
-  potCount:     bigint
-  paidCount:    number
-  usdcSettled:  bigint  // sum of target for PAID pots
-  feesAccrued:  bigint  // sum of floor(target * feeBps / 10000)
+export interface ProofStats {
+  potCount:    bigint
+  paidCount:   number
+  usdcSettled: bigint
+  feesAccrued: bigint
 }
-
-const STATUS_PAID = 2
 
 export function useProofStats() {
   const client = usePublicClient({ chainId: TARGET_CHAIN_ID })
-  const [stats, setStats]   = useState<Stats | null>(null)
+  const [stats, setStats]     = useState<ProofStats | null>(null)
   const [loading, setLoading] = useState(false)
-  const cacheUntil = useRef(0)
+  const cacheUntil            = useRef(0)
 
-  // feeBps — read once
-  const { data: feeBpsData } = useReadContract({
+  // potCount live from chain
+  const { data: potCountData } = useReadContract({
     address: POTLY_ADDRESS,
     abi: POTLY_ABI,
-    functionName: 'feeBps',
+    functionName: 'potCount',
     chainId: TARGET_CHAIN_ID,
+    query: { refetchInterval: 30_000 },
+  })
+  const potCount = (potCountData as bigint | undefined) ?? 0n
+
+  const { data: feeBpsData } = useReadContract({
+    address: POTLY_ADDRESS, abi: POTLY_ABI, functionName: 'feeBps', chainId: TARGET_CHAIN_ID,
   })
   const feeBps = (feeBpsData as number | undefined) ?? 0
 
   useEffect(() => {
-    if (!client) return
     if (Date.now() < cacheUntil.current) return  // still fresh
-
     let cancelled = false
+
     async function load() {
       setLoading(true)
       try {
-        const potCountRaw = await client!.readContract({
-          address: POTLY_ADDRESS,
-          abi: POTLY_ABI,
-          functionName: 'potCount',
-        }) as bigint
+        // ── 1. API ────────────────────────────────────────────────────────
+        const r = await fetch('/api/v1/stats').catch(() => null)
+        if (r && r.ok) {
+          const body = await r.json() as { ok: boolean; paid?: string; settled?: string; fees?: string }
+          if (body.ok && !cancelled) {
+            setStats((_s) => ({
+              potCount,
+              paidCount:   Number(body.paid ?? 0),
+              usdcSettled: BigInt(body.settled ?? 0),
+              feesAccrued: BigInt(body.fees   ?? 0),
+            }) satisfies ProofStats)
+            cacheUntil.current = Date.now() + CACHE_TTL
+            setLoading(false)
+            return
+          }
+        }
+      } catch { /* fall through */ }
 
-        const total    = Number(potCountRaw)
-        const scanEnd  = total
-        const scanStart = Math.max(1, total - MAX_POTS + 1)
+      // ── 2. Fallback multicall ─────────────────────────────────────────
+      if (!client) { setLoading(false); return }
+      try {
+        const total     = Number(potCount)
+        const scanStart = Math.max(1, total - FALLBACK_MAX + 1)
         const ids: bigint[] = []
-        for (let i = scanEnd; i >= scanStart; i--) ids.push(BigInt(i))
+        for (let i = total; i >= scanStart; i--) ids.push(BigInt(i))
 
-        let paidCount   = 0
-        let usdcSettled = 0n
-        let feesAccrued = 0n
-
+        let paidCount = 0; let usdcSettled = 0n; let feesAccrued = 0n
         for (let b = 0; b < ids.length; b += BATCH_SIZE) {
           if (cancelled) return
-          const batch = ids.slice(b, b + BATCH_SIZE)
-          const calls = batch.map(potId => ({
-            address: POTLY_ADDRESS,
-            abi: POTLY_ABI,
-            functionName: 'getPot' as const,
-            args: [potId] as const,
-          }))
-          const results = await client!.multicall({ contracts: calls, allowFailure: true })
+          const batch   = ids.slice(b, b + BATCH_SIZE)
+          const calls   = batch.map(id => ({ address: POTLY_ADDRESS, abi: POTLY_ABI, functionName: 'getPot' as const, args: [id] as const }))
+          const results = await client.multicall({ contracts: calls, allowFailure: true })
           for (const r of results) {
             if (r.status !== 'success') continue
             const pot = r.result as { status: number; target: bigint }
@@ -80,18 +94,22 @@ export function useProofStats() {
             }
           }
         }
-
         if (!cancelled) {
-          setStats({ potCount: potCountRaw, paidCount, usdcSettled, feesAccrued })
+          setStats({ potCount, paidCount, usdcSettled, feesAccrued })
           cacheUntil.current = Date.now() + CACHE_TTL
         }
-      } catch { /* ignore — last stats stay visible */ }
+      } catch { /* leave previous stats visible */ }
       finally { if (!cancelled) setLoading(false) }
     }
 
-    load()
+    void load()
     return () => { cancelled = true }
-  }, [client, feeBps])
+  }, [client, feeBps, potCount.toString()])
+
+  // Keep potCount in sync even when the rest is cached
+  useEffect(() => {
+    setStats(s => s ? { ...s, potCount } : null)
+  }, [potCount.toString()])
 
   return { stats, loading }
 }

@@ -79,7 +79,9 @@ input[type=range] {
 
 /* ── Two-column pot layout (desktop) ────────────────────────────────────── */
 /* Used in PotPage for max-w-[1120px] two-column grid */
-@media (min-width: 768px) {
+.pot-layout { display: flex; flex-direction: column; gap: 24px; }
+.pot-layout > * { min-width: 0; }
+@media (min-width: 1024px) {
   .pot-layout {
     display: grid;
     grid-template-columns: 1fr 360px;
@@ -122,10 +124,29 @@ input[type=range] {
 }
 .stat-grid > * { min-height: 64px; }
 
-/* ── Amount display — always USDC label ─────────────────────────────────── */
-.usdc-amount::after {
-  content: ' USDC';
-  font-size: 0.75em;
-  font-weight: 400;
-  opacity: 0.7;
+/* ── Responsive overflow prevention ─────────────────────────────────────── */
+/* Prevent addresses and long strings from causing horizontal scroll */
+.break-anywhere { overflow-wrap: anywhere; word-break: break-word; }
+/* All grid/flex children get min-width:0 by default so text can shrink */
+.min-w-0-children > * { min-width: 0; }
+/* Two-line clamp */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
+
+/* ── My Pots responsive grid ─────────────────────────────────────────────── */
+.pots-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+@media (min-width: 640px) {
+  .pots-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (min-width: 1024px) {
+  .pots-grid { grid-template-columns: repeat(3, 1fr); }
+}
+.pots-grid > * { display: flex; flex-direction: column; }  /* equal-height stretch */

@@ -79,9 +79,9 @@ export function StatusTimeline({ pot, events, aliases, chainTime }: Props) {
 
   // Paid out
   if (isPaid && payoutEvt) {
-    const recipient = payoutEvt.extra?.recipient ?? pot.recipient
-    const payout    = payoutEvt.extra?.payout ?? payoutEvt.amount
-    const fee       = payoutEvt.extra?.fee ?? '0'
+    const recipient = String(payoutEvt.extra?.recipient ?? pot.recipient)
+    const payout    = String(payoutEvt.extra?.payout ?? payoutEvt.amount)
+    const fee       = String(payoutEvt.extra?.fee ?? '0')
     steps.push(
       <Step key="paid" dot={<span className={DONE_DOT} />}
         label="Paid out"

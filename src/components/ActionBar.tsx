@@ -5,11 +5,13 @@ import { POTLY_ADDRESS, TARGET_CHAIN_ID } from '@/config/wagmi'
 import { estimatedGasUsdc6 } from '@/lib/gas'
 import { useGasPrice } from '@/hooks/useGasPrice'
 import { useUsdcBalance } from '@/hooks/useUsdcBalance'
+import { useUsdcAllowance } from '@/hooks/useUsdcBalance'
 import { useContributionOf, useIsRefundable, STATUS } from '@/hooks/usePot'
 import { TxButton } from './TxButton'
 import { ContributePanel } from './ContributePanel'
 import { WithdrawPanel } from './WithdrawPanel'
 import { formatAddress } from '@/lib/utils'
+import { fmtGasNative, usdc6ToWei } from '@/lib/fmt'
 import type { PotData } from '@/hooks/usePot'
 
 interface Props {
@@ -28,10 +30,19 @@ export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompa
   const { switchChain }      = useSwitchChain()
   const { writeContractAsync } = useWriteContract()
   const gasPrice             = useGasPrice()
-  const { balance }          = useUsdcBalance(address)
-  const { contribution }     = useContributionOf(potId, address)
+  const { balance, refetch: refetchBal } = useUsdcBalance(address)
+  const { refetch: refetchAllow } = useUsdcAllowance(address, POTLY_ADDRESS)
+  const { contribution, refetch: refetchContrib } = useContributionOf(potId, address)
   const isRefundable         = useIsRefundable(potId)
   const wrongChain           = chainId !== TARGET_CHAIN_ID
+
+  function handleAction() {
+    // Invalidate all reads after any confirmed tx so stale allowance never blocks re-deposit
+    void refetchBal()
+    void refetchAllow()
+    void refetchContrib()
+    onAction()
+  }
 
   if (!address) {
     return <p className="text-sm text-[var(--muted)]">Connect your wallet to interact.</p>
@@ -43,6 +54,7 @@ export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompa
 
   const claimGas   = estimatedGasUsdc6('claimPayout', gasPrice)
   const canClaim   = balance >= claimGas
+  const claimGasDisplay = fmtGasNative(usdc6ToWei(claimGas))
 
   // EXPIRED + OPEN = refunds open
   if (isExpired && status === STATUS.OPEN) {
@@ -53,7 +65,10 @@ export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompa
           Expired: refunds open
         </div>
         {contribution > 0n && isRefundable && (
-          <WithdrawPanel potId={potId} contribution={contribution} onSuccess={onAction} />
+          <WithdrawPanel potId={potId} contribution={contribution} onSuccess={handleAction} />
+        )}
+        {contribution === 0n && (
+          <p className="text-xs text-[var(--muted)]">No contribution to refund.</p>
         )}
       </div>
     )
@@ -65,16 +80,16 @@ export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompa
     return (
       <div className="flex flex-col gap-4">
         {!slotsFull && raised < target ? (
-          <ContributePanel potId={potId} pot={pot} onSuccess={onAction} />
+          <ContributePanel potId={potId} pot={pot} onSuccess={handleAction} />
         ) : raised >= target ? (
           <p className="text-sm text-[var(--success)]">Target reached — awaiting payout claim.</p>
         ) : (
-          <p className="text-sm text-[var(--muted)]">All contributor slots are taken.</p>
+          <p className="text-sm text-[var(--muted)]">All contributor spots taken.</p>
         )}
 
         {contribution > 0n && isRefundable && (
           <div className="border-t border-[var(--border)] pt-4">
-            <WithdrawPanel potId={potId} contribution={contribution} onSuccess={onAction} />
+            <WithdrawPanel potId={potId} contribution={contribution} onSuccess={handleAction} />
           </div>
         )}
 
@@ -93,7 +108,7 @@ export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompa
                   chainId: TARGET_CHAIN_ID,
                 })
               }}
-              onSuccess={onAction}
+              onSuccess={handleAction}
               onReceipt={syncTx ? (r) => syncTx(r.transactionHash) : undefined}
             />
           </div>
@@ -107,12 +122,12 @@ export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompa
     return (
       <div className="flex flex-col gap-4">
         <div className="text-sm text-[var(--ink-2)]">
-          Recipient: <span className="font-mono">{formatAddress(recipient)}</span>
+          Recipient: <span className="font-mono break-all">{formatAddress(recipient)}</span>
         </div>
         <TxButton
           label="Pay out to recipient"
           disabled={!canClaim}
-          disabledReason="Not enough USDC for gas"
+          disabledReason={`Not enough USDC for gas (~${claimGasDisplay} USDC)`}
           onSubmit={async () => {
             if (wrongChain) { switchChain({ chainId: TARGET_CHAIN_ID }); return }
             return writeContractAsync({
@@ -123,12 +138,12 @@ export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompa
               chainId: TARGET_CHAIN_ID,
             })
           }}
-          onSuccess={onAction}
+          onSuccess={handleAction}
           onReceipt={syncTx ? (r) => syncTx(r.transactionHash) : undefined}
         />
         {contribution > 0n && isRefundable && (
           <div className="border-t border-[var(--border)] pt-4">
-            <WithdrawPanel potId={potId} contribution={contribution} onSuccess={onAction} />
+            <WithdrawPanel potId={potId} contribution={contribution} onSuccess={handleAction} />
           </div>
         )}
       </div>
@@ -141,7 +156,7 @@ export function ActionBar({ potId, pot, chainTime, onAction, syncTx, mobileCompa
       return (
         <div className="flex flex-col gap-3">
           <p className="text-sm text-[var(--muted)]">Pot cancelled — you can withdraw your contribution.</p>
-          <WithdrawPanel potId={potId} contribution={contribution} onSuccess={onAction} />
+          <WithdrawPanel potId={potId} contribution={contribution} onSuccess={handleAction} />
         </div>
       )
     }

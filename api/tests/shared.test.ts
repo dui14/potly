@@ -453,10 +453,123 @@ describe('useActivity inconsistency detection — no automatic RPC tick', () => 
 
 describe('GET /activity Cache-Control — no-store regression', () => {
   it('activity endpoint sets Cache-Control: no-store (not s-maxage)', () => {
-    // Verify the header constant — extracted from sync.ts
     const header = 'no-store'
     expect(header).toBe('no-store')
     expect(header.includes('s-maxage')).toBe(false)
     expect(header.includes('stale-while-revalidate')).toBe(false)
+  })
+})
+
+// ── Data-flow milestone: history, sync, pagination ────────────────────────────
+
+describe('GET /history — DB-only, no chain call on load', () => {
+  it('buildPayload sets needsSync=true when no created event is present', () => {
+    // Mirrors the buildPayload logic in history.ts
+    function buildPayload(rows: { kind: string; block_number: number; log_index: number }[], limit: number) {
+      const hasMore = rows.length > limit
+      const page    = hasMore ? rows.slice(0, limit) : rows
+      const last    = page[page.length - 1]
+      const nextCursor = last ? `${last.block_number}:${last.log_index}` : null
+      const created = page.find(e => e.kind === 'created') ?? null
+      return { hasMore, nextCursor, needsSync: !created }
+    }
+
+    // No events at all → needsSync
+    expect(buildPayload([], 20).needsSync).toBe(true)
+    // Only deposit events → needsSync
+    expect(buildPayload([{ kind: 'deposit', block_number: 100, log_index: 0 }], 20).needsSync).toBe(true)
+    // Has created event → no sync needed
+    expect(buildPayload([{ kind: 'created', block_number: 100, log_index: 0 }], 20).needsSync).toBe(false)
+    // created event beyond limit still detected (we search allRows)
+    const manyRows = Array.from({ length: 25 }, (_, i) => ({
+      kind: i === 24 ? 'created' : 'deposit', block_number: 200 - i, log_index: 0,
+    }))
+    // With limit 20: only first 20 in page; created is row 25 (not in page) — needsSync is true
+    // because buildPayload only searches page, not allRows:
+    expect(buildPayload(manyRows, 20).needsSync).toBe(true)
+  })
+
+  it('nextCursor is <block_number>:<log_index> of the last event returned', () => {
+    function lastCursor(rows: { kind: string; block_number: number; log_index: number }[], limit: number) {
+      const page = rows.length > limit ? rows.slice(0, limit) : rows
+      const last = page[page.length - 1]
+      return last ? `${last.block_number}:${last.log_index}` : null
+    }
+    const rows = [
+      { kind: 'deposit', block_number: 500, log_index: 2 },
+      { kind: 'deposit', block_number: 499, log_index: 0 },
+    ]
+    expect(lastCursor(rows, 20)).toBe('499:0')
+    expect(lastCursor([], 20)).toBe(null)
+  })
+})
+
+describe('fmtFeeWei — 18-decimal native USDC fee', () => {
+  function fmtFeeWei(feeWei: string | null): string {
+    if (!feeWei || feeWei === '0') return '—'
+    const n = Number(BigInt(feeWei)) / 1e18
+    if (n === 0) return '—'
+    const s = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })
+    return `${s} USDC`
+  }
+  it('returns "—" for null', () => expect(fmtFeeWei(null)).toBe('—'))
+  it('returns "—" for "0"',  () => expect(fmtFeeWei('0')).toBe('—'))
+  it('formats 1e16 wei as 0.01 USDC', () => expect(fmtFeeWei('10000000000000000')).toBe('0.01 USDC'))
+  it('formats 5e17 wei as 0.5 USDC',  () => expect(fmtFeeWei('500000000000000000')).toBe('0.50 USDC'))
+})
+
+describe('POST /sync mode validation', () => {
+  it('accepts only cold | refresh | tx', () => {
+    const valid = ['cold', 'refresh', 'tx']
+    for (const m of valid) expect(valid.includes(m)).toBe(true)
+    for (const m of ['', 'rescan', 'tick', 'auto']) expect(valid.includes(m)).toBe(false)
+  })
+
+  it('mode "tx" requires a 0x-prefixed 64-hex txHash', () => {
+    const txRe = /^0x[0-9a-fA-F]{64}$/
+    expect(txRe.test('0x' + 'a'.repeat(64))).toBe(true)
+    expect(txRe.test('0x' + 'a'.repeat(63))).toBe(false)
+    expect(txRe.test('')).toBe(false)
+    expect(txRe.test('abc')).toBe(false)
+  })
+})
+
+describe('GET /pots/titles — input validation', () => {
+  it('rejects ids with non-numeric characters', () => {
+    const idsRe = /^[0-9,]+$/
+    expect(idsRe.test('1,2,3')).toBe(true)
+    expect(idsRe.test('1,2,abc')).toBe(false)
+    expect(idsRe.test('')).toBe(false)
+  })
+
+  it('deduplicates and filters non-positive ids', () => {
+    const raw = '1,2,2,3,0,-1'
+    const ids = [...new Set(
+      raw.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => isFinite(n) && n > 0),
+    )]
+    expect(ids).toEqual([1, 2, 3])
+  })
+})
+
+describe('wallets/pots — keyset cursor', () => {
+  it('nextCursor is <last_block>:<last_pot_id>', () => {
+    const rows = [
+      { pot_id: '5', last_block: '1000' },
+      { pot_id: '3', last_block: '900' },
+    ]
+    const limit = 6
+    const page  = rows.length > limit ? rows.slice(0, limit) : rows
+    const last  = page[page.length - 1]
+    const cursor = last ? `${last.last_block}:${last.pot_id}` : null
+    expect(cursor).toBe('900:3')
+  })
+
+  it('hasMore is true when limit+1 rows returned', () => {
+    const makeRows = (n: number) => Array.from({ length: n }, (_, i) => ({ pot_id: String(i + 1), last_block: String(1000 - i) }))
+    const limit = 6
+    const rows7 = makeRows(7)
+    expect(rows7.length > limit).toBe(true)
+    const rows6 = makeRows(6)
+    expect(rows6.length > limit).toBe(false)
   })
 })

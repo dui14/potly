@@ -18,7 +18,7 @@ interface Props {
   potId: bigint
   pot: PotData
   chainTime: bigint
-  onAction: () => void
+  onAction: (txHash?: string) => void
   syncTx?: (txHash: string) => void
   mobileCompact?: boolean
 }

@@ -1,7 +1,7 @@
 import { useParams } from 'react-router-dom'
 import { usePot, STATUS } from '@/hooks/usePot'
 import { useChainTime } from '@/hooks/useChainTime'
-import { useActivity } from '@/hooks/useActivity'
+import { useHistory } from '@/hooks/useHistory'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Countdown } from '@/components/Countdown'
 import { ActionBar } from '@/components/ActionBar'
@@ -22,9 +22,15 @@ export function PotPage() {
 
   const { pot, isLoading, refetch } = usePot(potId)
   const chainTime = useChainTime()
-  const meta = usePotMeta(TARGET_CHAIN_ID, potId)
+  const meta  = usePotMeta(TARGET_CHAIN_ID, potId)
   const title = meta.title
-  const { events, aliases: actAliases, syncTx, refresh, error } = useActivity(potId, pot?.raised)
+
+  // History hook: DB-first, no polling
+  const {
+    created, events, aliases: histAliases, hasMore: histHasMore,
+    loading: histLoading, syncing, refreshCooldown, lastRefreshed,
+    error: histError, loadMore: histLoadMore, syncTx, refresh,
+  } = useHistory(potId)
 
   const [recipientAlias, setRecipientAlias] = useState<string | null>(null)
   useEffect(() => {
@@ -68,11 +74,14 @@ export function PotPage() {
     ? `@${recipientAlias} (${formatAddress(pot.recipient)})`
     : formatAddress(pot.recipient)
 
-  const handleAction = () => { refetch(); void refresh() }
+  // After user's own tx: refetch pot state + sync the tx event
+  const handleAction = (txHash?: string) => {
+    refetch()
+    if (txHash) void syncTx(txHash)
+  }
 
   return (
     <main className="max-w-[1120px] mx-auto px-4 py-8">
-      {/* Mobile: single column. Desktop: two-column via .pot-layout */}
       <div className="pot-layout">
 
         {/* ── Left column ──────────────────────────────────────────────── */}
@@ -114,18 +123,23 @@ export function PotPage() {
             <ProgressBar raised={pot.raised} target={pot.target} />
           </div>
 
-          {/* Contributors */}
+          {/* Contributors + history */}
           {potId !== undefined && (
             <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 flex flex-col gap-3">
               <h3 className="text-xs font-semibold text-[var(--muted)] uppercase tracking-wider">Contributors</h3>
               <ContributorsList
-            potId={potId}
-            pot={pot}
-            events={events}
-            aliases={actAliases}
-            activityError={error}
-            onRefresh={refresh}
-          />
+                potId={potId}
+                pot={pot}
+                events={events as import('@/hooks/useHistory').HistoryEvent[]}
+                aliases={histAliases}
+                activityError={histError}
+                syncing={syncing}
+                hasMore={histHasMore}
+                onRefresh={refresh}
+                onLoadMore={histLoadMore}
+                refreshCooldown={refreshCooldown}
+                lastRefreshed={lastRefreshed}
+              />
             </section>
           )}
 
@@ -135,10 +149,11 @@ export function PotPage() {
             <StatusTimeline
               pot={pot}
               potId={potId ?? 0n}
-              events={events}
-              aliases={actAliases}
+              events={events as import('@/hooks/useActivity').PotEvent[]}
+              aliases={histAliases}
               chainTime={chainTime}
-              onRefresh={refresh}
+              createdFromHistory={created}
+              loading={histLoading}
             />
           </section>
 
@@ -161,7 +176,7 @@ export function PotPage() {
         )}
       </div>
 
-      {/* Mobile sticky bottom bar — primary action only */}
+      {/* Mobile sticky bottom bar */}
       {potId !== undefined && (
         <div className="mobile-action-bar">
           <ActionBar potId={potId} pot={pot} chainTime={chainTime} onAction={handleAction} syncTx={syncTx} mobileCompact />

@@ -1,14 +1,14 @@
 /**
- * ContributorsList v6
+ * ContributorsList v7
  *
- * History table spec (Issue 1):
- *   - Columns: Timestamp | Alias | Address | Type | Amount | View | Fee
- *   - deposit and withdraw events only (no approve, no system events)
- *   - Newest blockchain event first
- *   - Refresh button: lazily scans chain via POST .../rescan, then reloads from DB
- *   - Subsequent page loads read from Supabase without rescanning
- *
- * Summary section above the table still shows live contributionOf per wallet.
+ * History table spec:
+ *   Columns: Timestamp | Alias | Address | Type | Amount | View | Fee
+ *   Timestamp: en-US, 24-hour clock with seconds; full UTC in title tooltip.
+ *   Type: Deposit, Withdraw (user rows) | Created, Filled, Paid out, Cancelled (system rows)
+ *   Fee: from fee_wei (18-decimal native USDC), up to 6 decimals; "—" when null.
+ *   Filter chips: All | Deposits | Withdrawals | System
+ *   Newest blockchain event first. 20 rows with Load more.
+ *   Refresh button calls POST sync mode="refresh", disabled 10 s, shows spinner.
  */
 import { useState, useEffect, useRef } from 'react'
 import { usePublicClient } from 'wagmi'
@@ -16,67 +16,100 @@ import { POTLY_ABI } from '@/lib/potlyAbi'
 import { POTLY_ADDRESS, TARGET_CHAIN_ID, buildTxUrl } from '@/config/wagmi'
 import { fetchAliasesByWallets } from '@/lib/supabase'
 import { formatAddress } from '@/lib/utils'
-import { formatDateTime } from '@/lib/fmt'
 import type { PotData } from '@/hooks/usePot'
-import type { PotEvent } from '@/hooks/useActivity'
+import type { HistoryEvent } from '@/hooks/useHistory'
 import { ExternalLink, RefreshCw } from 'lucide-react'
 
 const PAGE = 20
 
-type WalletData = { address: `0x${string}`; liveAmount: bigint; withdrawTotal: bigint }
+type FilterChip = 'all' | 'deposits' | 'withdrawals' | 'system'
+const SYSTEM_KINDS = new Set(['created', 'filled', 'payout', 'cancelled'])
 
-function fmt(raw: bigint) {
+function fmtUsdcRaw(raw: bigint): string {
   return (Number(raw) / 1_000_000).toLocaleString('en-US', {
     minimumFractionDigits: 2, maximumFractionDigits: 6,
   })
 }
 
-function fmtAmount(ev: PotEvent): string {
+function fmtAmount(ev: HistoryEvent): string {
   if (!ev.amount || ev.amount === '0') return '—'
   const n = Number(BigInt(ev.amount)) / 1_000_000
   const s = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })
-  return ev.kind === 'deposit' ? `+${s}` : `−${s}`
+  if (ev.kind === 'deposit')  return `+${s}`
+  if (ev.kind === 'withdraw') return `−${s}`
+  return s
 }
 
-function fmtFee(ev: PotEvent): string {
-  // Only payout events carry a protocol fee; deposits/withdrawals have none.
-  const fee = (ev.extra as Record<string, unknown>)?.fee
-  if (fee === undefined || fee === null || fee === '' || fee === '0') return '—'
-  const n = Number(BigInt(String(fee))) / 1_000_000
+function fmtFeeWei(feeWei: string | null): string {
+  if (!feeWei || feeWei === '0') return '—'
+  const n = Number(BigInt(feeWei)) / 1e18   // 18-decimal native USDC
   if (n === 0) return '—'
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 }) + ' USDC'
+  const s = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })
+  return `${s} USDC`
+}
+
+// Timestamp: "Oct 28, 2026 19:23:41" (en-US, 24-hour, seconds)
+const DT_FMT = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric', month: 'short', day: 'numeric',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hour12: false, timeZone: 'UTC',
+})
+function fmtTimestamp(iso: string): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return '—'
+  return DT_FMT.format(d)
+}
+
+function typeLabel(kind: string): string {
+  switch (kind) {
+    case 'deposit':   return 'Deposit'
+    case 'withdraw':  return 'Withdraw'
+    case 'created':   return 'Created'
+    case 'filled':    return 'Filled'
+    case 'payout':    return 'Paid out'
+    case 'cancelled': return 'Cancelled'
+    default:          return kind
+  }
+}
+
+function typeBadgeClass(kind: string): string {
+  switch (kind) {
+    case 'deposit':   return 'bg-emerald-900/30 text-emerald-300 border-emerald-700/30'
+    case 'withdraw':  return 'bg-amber-900/30 text-amber-300 border-amber-700/30'
+    default:          return 'bg-[var(--surface-muted)] text-[var(--muted)] border-[var(--border)]'
+  }
 }
 
 interface Props {
-  potId:         bigint
-  pot:           PotData
-  events:        PotEvent[]
-  aliases:       Record<string, string>
-  activityError: string | null
-  syncing?:      boolean
-  hasMore?:      boolean
-  onRefresh?:    () => void   // used by summary retry button only
-  onLoadMore?:   () => void
-  lastFetch?:    number
+  potId:            bigint
+  pot:              PotData
+  events:           HistoryEvent[]
+  aliases:          Record<string, string>
+  activityError:    string | null
+  syncing?:         boolean
+  hasMore?:         boolean
+  onRefresh?:       () => void
+  onLoadMore?:      () => void
+  refreshCooldown?: boolean
+  lastRefreshed?:   number
 }
 
 export function ContributorsList({
   potId, pot, events, aliases: propAliases,
   activityError, syncing, hasMore, onRefresh, onLoadMore,
+  refreshCooldown, lastRefreshed,
 }: Props) {
   const client = usePublicClient({ chainId: TARGET_CHAIN_ID })
-  const [wallets, setWallets]   = useState<WalletData[]>([])
-  const [aliases, setAliases]   = useState<Record<string, string>>(propAliases)
-  const [page, setPage]         = useState(1)
-  const [scanning, setScanning] = useState(false)
-  const [scanError, setScanError] = useState<string | null>(null)
-  const cooldownRef             = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [cooldown, setCooldown] = useState(false)
+  const [wallets,  setWallets]  = useState<{ address: `0x${string}`; liveAmount: bigint; withdrawTotal: bigint }[]>([])
+  const [aliases,  setAliases]  = useState<Record<string, string>>(propAliases)
+  const [page,     setPage]     = useState(1)
+  const [filter,   setFilter]   = useState<FilterChip>('all')
 
   // Sync aliases
   useEffect(() => { setAliases(propAliases) }, [JSON.stringify(propAliases)])
 
-  // Build wallet summary from events
+  // Build wallet summary from deposit/withdraw events
   useEffect(() => {
     if (events.length === 0) { setWallets([]); return }
     const depMap = new Map<string, bigint>()
@@ -100,12 +133,13 @@ export function ContributorsList({
     }
   }, [JSON.stringify(events.map(e => `${e.kind}${e.wallet}${e.amount}`))])
 
-  // Multicall contributionOf — fires once when the wallet address list stabilises.
-  // Dep is a sorted address fingerprint so it re-runs only when addresses change,
-  // not on every wallets.length bump caused by the liveAmount update above.
+  // Multicall contributionOf — fires once per stable wallet-address set
   const walletAddrKey = wallets.map(w => w.address).sort().join(',')
+  const multicallFiredRef = useRef('')
   useEffect(() => {
     if (!client || wallets.length === 0) return
+    if (multicallFiredRef.current === walletAddrKey) return  // dedup
+    multicallFiredRef.current = walletAddrKey
     let cancelled = false
     const calls = wallets.map(w => ({
       address: POTLY_ADDRESS, abi: POTLY_ABI,
@@ -118,45 +152,23 @@ export function ContributorsList({
         ...w,
         liveAmount: results[i].status === 'success' ? (results[i].result as bigint) : w.liveAmount,
       })))
-    }).catch(() => { /* keep event-derived amounts */ })
+    }).catch(() => {})
     return () => { cancelled = true }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, potId.toString(), walletAddrKey])
 
-  useEffect(() => () => { cooldownRef.current && clearTimeout(cooldownRef.current) }, [])
+  // Filter events for history table
+  const filtered = events.filter(ev => {
+    if (filter === 'deposits')    return ev.kind === 'deposit'
+    if (filter === 'withdrawals') return ev.kind === 'withdraw'
+    if (filter === 'system')      return SYSTEM_KINDS.has(ev.kind)
+    return true
+  })
 
-  // Refresh: scan chain → upsert → reload from DB
-  async function handleRescan() {
-    if (cooldown || scanning) return
-    setScanning(true)
-    setScanError(null)
-    setCooldown(true)
-    cooldownRef.current = setTimeout(() => setCooldown(false), 10_000)
+  const lastRefreshedText = lastRefreshed
+    ? new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' }).format(new Date(lastRefreshed))
+    : null
 
-    try {
-      const r = await fetch(
-        `/api/v1/pots/${TARGET_CHAIN_ID}/${potId}/rescan`,
-        { method: 'POST' },
-      )
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({})) as { error?: string }
-        setScanError(j.error ?? `HTTP ${r.status}`)
-      } else {
-        // Reload from DB via parent's onRefresh
-        onRefresh?.()
-        setPage(1)
-      }
-    } catch (e) {
-      setScanError(String(e))
-    } finally {
-      setScanning(false)
-    }
-  }
-
-  // History: deposit + withdraw only, newest first (API already returns newest-first)
-  const historyEvents = events.filter(ev => ev.kind === 'deposit' || ev.kind === 'withdraw')
-
-  // API error fallback
   if (activityError && events.length === 0) {
     return (
       <div className="flex items-center justify-between text-sm text-[var(--muted)] py-3">
@@ -169,9 +181,16 @@ export function ContributorsList({
   const current = wallets.filter(w => w.liveAmount > 0n)
   const former  = wallets.filter(w => w.liveAmount === 0n && w.withdrawTotal > 0n)
 
+  const CHIPS: { id: FilterChip; label: string }[] = [
+    { id: 'all',         label: 'All' },
+    { id: 'deposits',    label: 'Deposits' },
+    { id: 'withdrawals', label: 'Withdrawals' },
+    { id: 'system',      label: 'System' },
+  ]
+
   return (
     <div className="flex flex-col gap-5">
-      {/* ── Contributor summary ───────────────────────────────────────────── */}
+      {/* ── Contributor summary ────────────────────────────────────────── */}
       <section>
         <div className="flex items-center justify-between mb-2 min-w-0">
           <span className="text-xs text-[var(--muted)]">
@@ -180,88 +199,94 @@ export function ContributorsList({
             <span className="text-[var(--subtle)]">New wallets need a free spot; existing contributors can add more.</span>
           </span>
         </div>
-
         {current.length === 0 && (
           <p className="text-sm text-[var(--muted)] py-2">No contributions yet.</p>
         )}
-
         <div className="flex flex-col gap-1">
           {current.sort((a, b) => a.liveAmount < b.liveAmount ? 1 : -1).map((w, i) => {
             const al      = aliases[w.address]
             const display = al ? `@${al}` : formatAddress(w.address)
             const pct     = pot.target > 0n ? Number((w.liveAmount * 10000n) / pot.target) / 100 : 0
             return (
-              <div key={w.address}
-                className="w-full flex items-center gap-2 rounded-xl px-3 py-2.5 bg-[var(--surface-muted)] min-w-0"
-              >
+              <div key={w.address} className="w-full flex items-center gap-2 rounded-xl px-3 py-2.5 bg-[var(--surface-muted)] min-w-0">
                 <span className="text-xs text-[var(--subtle)] w-5 shrink-0">#{i + 1}</span>
                 <span className="flex-1 text-sm font-mono text-[var(--ink-2)] truncate min-w-0">{display}</span>
                 <div className="flex items-center gap-2 shrink-0">
                   {w.withdrawTotal > 0n && (
                     <span className="hidden sm:inline text-[10px] bg-amber-900/30 text-amber-300 border border-amber-700/30 rounded px-1.5 py-0.5">
-                      withdrew {fmt(w.withdrawTotal)}
+                      withdrew {fmtUsdcRaw(w.withdrawTotal)}
                     </span>
                   )}
-                  <span className="tabular-nums text-sm text-[var(--ink)]">{fmt(w.liveAmount)} USDC</span>
+                  <span className="tabular-nums text-sm text-[var(--ink)]">{fmtUsdcRaw(w.liveAmount)} USDC</span>
                   <span className="text-xs text-[var(--subtle)]">{pct.toFixed(1)}%</span>
                 </div>
               </div>
             )
           })}
         </div>
-
         {former.length > 0 && (
           <div className="mt-2 flex flex-col gap-1">
             <p className="text-xs text-[var(--subtle)] px-1 mb-1">Former contributors</p>
-            {former.map(w => {
-              const al      = aliases[w.address]
-              const display = al ? `@${al}` : formatAddress(w.address)
-              return (
-                <div key={w.address}
-                  className="w-full flex items-center gap-2 rounded-xl px-3 py-2 min-w-0 opacity-60"
-                >
-                  <span className="flex-1 text-xs font-mono text-[var(--muted)] truncate min-w-0">{display}</span>
-                  <span className="text-xs text-[var(--subtle)] shrink-0">withdrew {fmt(w.withdrawTotal)}</span>
-                </div>
-              )
-            })}
+            {former.map(w => (
+              <div key={w.address} className="w-full flex items-center gap-2 rounded-xl px-3 py-2 min-w-0 opacity-60">
+                <span className="flex-1 text-xs font-mono text-[var(--muted)] truncate min-w-0">
+                  {aliases[w.address] ? `@${aliases[w.address]}` : formatAddress(w.address)}
+                </span>
+                <span className="text-xs text-[var(--subtle)] shrink-0">withdrew {fmtUsdcRaw(w.withdrawTotal)}</span>
+              </div>
+            ))}
           </div>
         )}
       </section>
 
-      {/* ── Transaction history ──────────────────────────────────────────── */}
+      {/* ── Transaction history ────────────────────────────────────────── */}
       <section>
-        <div className="flex items-center justify-between mb-3 min-w-0 gap-2">
+        {/* Header row */}
+        <div className="flex items-center justify-between mb-3 min-w-0 gap-2 flex-wrap">
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-semibold text-[var(--ink)]">Transaction history</h3>
-            {(syncing || scanning) && (
-              <span className="text-xs text-[var(--accent)] animate-pulse">
-                {scanning ? 'Scanning chain…' : 'Syncing…'}
-              </span>
+            {syncing && (
+              <span className="text-xs text-[var(--accent)] animate-pulse">Scanning chain…</span>
+            )}
+            {lastRefreshedText && !syncing && (
+              <span className="text-xs text-[var(--subtle)]">Updated {lastRefreshedText}</span>
             )}
           </div>
           <button
-            onClick={handleRescan}
-            disabled={cooldown || scanning}
-            title={cooldown ? 'Wait 10 s between refreshes' : 'Scan chain and refresh history'}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--border)] text-xs text-[var(--muted)] hover:text-[var(--ink)] transition ${cooldown || scanning ? 'opacity-40 cursor-not-allowed' : ''}`}
+            onClick={onRefresh}
+            disabled={refreshCooldown || syncing}
+            title={refreshCooldown ? 'Wait 10 s between refreshes' : 'Scan chain and refresh history'}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--border)] text-xs text-[var(--muted)] hover:text-[var(--ink)] transition ${refreshCooldown || syncing ? 'opacity-40 cursor-not-allowed' : ''}`}
           >
-            <RefreshCw size={11} className={scanning ? 'animate-spin' : ''} />
+            <RefreshCw size={11} className={syncing ? 'animate-spin' : ''} />
             Refresh
           </button>
         </div>
 
-        {scanError && (
-          <p className="text-xs text-[var(--danger)] mb-2 px-1">{scanError}</p>
-        )}
+        {/* Filter chips */}
+        <div className="flex gap-1.5 mb-3 flex-wrap">
+          {CHIPS.map(c => (
+            <button
+              key={c.id}
+              onClick={() => { setFilter(c.id); setPage(1) }}
+              className={`px-2.5 py-0.5 rounded-full text-xs border transition ${
+                filter === c.id
+                  ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/30'
+                  : 'bg-transparent text-[var(--muted)] border-[var(--border)] hover:text-[var(--ink)]'
+              }`}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
 
-        {historyEvents.length === 0 && (
+        {filtered.length === 0 && (
           <p className="text-sm text-[var(--muted)] py-3 text-center">
-            {syncing || scanning ? 'Scanning history…' : 'No deposit or withdrawal events yet.'}
+            {syncing ? 'Scanning history…' : 'No events yet.'}
           </p>
         )}
 
-        {historyEvents.length > 0 && (
+        {filtered.length > 0 && (
           <>
             {/* Desktop table */}
             <div className="hidden md:block overflow-x-auto">
@@ -278,16 +303,19 @@ export function ContributorsList({
                   </tr>
                 </thead>
                 <tbody>
-                  {historyEvents.slice(0, page * PAGE).map((ev, i) => {
+                  {filtered.slice(0, page * PAGE).map((ev, i) => {
                     const walletLc = ev.wallet.toLowerCase()
                     const al = aliases[walletLc]
+                    const isUserRow = ev.kind === 'deposit' || ev.kind === 'withdraw'
                     return (
                       <tr
                         key={`${ev.tx_hash}-${ev.log_index}-${i}`}
                         className="border-b border-[var(--border)]/40 hover:bg-[var(--surface-muted)]/50 transition"
                       >
                         <td className="py-2.5 pr-3 text-xs text-[var(--muted)] whitespace-nowrap">
-                          {ev.block_time ? formatDateTime(ev.block_time) : `#${ev.block_number}`}
+                          <span title={ev.block_time ? `UTC: ${ev.block_time}` : undefined}>
+                            {ev.block_time ? fmtTimestamp(ev.block_time) : `#${ev.block_number}`}
+                          </span>
                         </td>
                         <td className="py-2.5 pr-3 text-xs text-[var(--ink-2)] max-w-[100px] truncate">
                           {al ? `@${al}` : '—'}
@@ -296,18 +324,14 @@ export function ContributorsList({
                           {ev.wallet ? formatAddress(ev.wallet as `0x${string}`) : '—'}
                         </td>
                         <td className="py-2.5 pr-3">
-                          <span className={`text-[10px] border rounded px-1.5 py-0.5 font-medium whitespace-nowrap ${
-                            ev.kind === 'deposit'
-                              ? 'bg-emerald-900/30 text-emerald-300 border-emerald-700/30'
-                              : 'bg-amber-900/30 text-amber-300 border-amber-700/30'
-                          }`}>
-                            {ev.kind === 'deposit' ? 'Deposit' : 'Withdraw'}
+                          <span className={`text-[10px] border rounded px-1.5 py-0.5 font-medium whitespace-nowrap ${typeBadgeClass(ev.kind)}`}>
+                            {typeLabel(ev.kind)}
                           </span>
                         </td>
                         <td className={`py-2.5 pr-3 text-right tabular-nums text-xs font-medium whitespace-nowrap ${
-                          ev.kind === 'deposit' ? 'text-[var(--success)]' : 'text-amber-300'
+                          ev.kind === 'deposit' ? 'text-[var(--success)]' : isUserRow ? 'text-amber-300' : 'text-[var(--muted)]'
                         }`}>
-                          {fmtAmount(ev)}
+                          {isUserRow ? fmtAmount(ev) : '—'}
                         </td>
                         <td className="py-2.5 pr-3 text-center">
                           {ev.tx_hash ? (
@@ -322,7 +346,7 @@ export function ContributorsList({
                           ) : '—'}
                         </td>
                         <td className="py-2.5 text-right text-xs text-[var(--muted)] tabular-nums whitespace-nowrap">
-                          {fmtFee(ev)}
+                          {fmtFeeWei(ev.fee_wei)}
                         </td>
                       </tr>
                     )
@@ -331,46 +355,40 @@ export function ContributorsList({
               </table>
             </div>
 
-            {/* Mobile stacked cards */}
+            {/* Mobile cards */}
             <div className="flex flex-col gap-2 md:hidden">
-              {historyEvents.slice(0, page * PAGE).map((ev, i) => {
-                const walletLc = ev.wallet.toLowerCase()
-                const al = aliases[walletLc]
-                const fee = fmtFee(ev)
+              {filtered.slice(0, page * PAGE).map((ev, i) => {
+                const al  = aliases[ev.wallet?.toLowerCase() ?? '']
+                const fee = fmtFeeWei(ev.fee_wei)
+                const isUserRow = ev.kind === 'deposit' || ev.kind === 'withdraw'
                 return (
                   <div
                     key={`${ev.tx_hash}-${ev.log_index}-${i}`}
                     className="rounded-xl bg-[var(--surface-muted)] p-3 flex flex-col gap-1.5 text-xs min-w-0"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className={`border rounded px-1.5 py-0.5 font-medium ${
-                        ev.kind === 'deposit'
-                          ? 'bg-emerald-900/30 text-emerald-300 border-emerald-700/30'
-                          : 'bg-amber-900/30 text-amber-300 border-amber-700/30'
-                      }`}>
-                        {ev.kind === 'deposit' ? 'Deposit' : 'Withdraw'}
+                      <span className={`border rounded px-1.5 py-0.5 font-medium ${typeBadgeClass(ev.kind)}`}>
+                        {typeLabel(ev.kind)}
                       </span>
-                      <span className="text-[var(--muted)]">
-                        {ev.block_time ? formatDateTime(ev.block_time) : `#${ev.block_number}`}
+                      <span className="text-[var(--muted)]" title={ev.block_time ?? undefined}>
+                        {ev.block_time ? fmtTimestamp(ev.block_time) : `#${ev.block_number}`}
                       </span>
                     </div>
                     <div className="flex flex-col gap-0.5 min-w-0">
                       {al && <span className="text-[var(--ink-2)]">@{al}</span>}
-                      <span className="font-mono text-[var(--subtle)] break-anywhere">{ev.wallet ? formatAddress(ev.wallet as `0x${string}`) : '—'}</span>
+                      <span className="font-mono text-[var(--subtle)] break-anywhere">
+                        {ev.wallet ? formatAddress(ev.wallet as `0x${string}`) : '—'}
+                      </span>
                     </div>
                     <div className="flex items-center justify-between gap-2 min-w-0">
-                      <span className={`font-medium tabular-nums ${ev.kind === 'deposit' ? 'text-[var(--success)]' : 'text-amber-300'}`}>
-                        {fmtAmount(ev)}
+                      <span className={`font-medium tabular-nums ${ev.kind === 'deposit' ? 'text-[var(--success)]' : isUserRow ? 'text-amber-300' : 'text-[var(--muted)]'}`}>
+                        {isUserRow ? fmtAmount(ev) : '—'}
                       </span>
                       <div className="flex items-center gap-3 shrink-0">
                         {fee !== '—' && <span className="text-[var(--subtle)]">Fee: {fee}</span>}
                         {ev.tx_hash && (
-                          <a
-                            href={buildTxUrl(ev.tx_hash)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-0.5 text-[var(--muted)] hover:text-[var(--ink)] transition"
-                          >
+                          <a href={buildTxUrl(ev.tx_hash)} target="_blank" rel="noopener noreferrer"
+                            className="flex items-center gap-0.5 text-[var(--muted)] hover:text-[var(--ink)] transition">
                             View <ExternalLink size={10} />
                           </a>
                         )}
@@ -382,13 +400,13 @@ export function ContributorsList({
             </div>
 
             {/* Load more */}
-            {(page * PAGE < historyEvents.length || hasMore) && (
+            {(page * PAGE < filtered.length || hasMore) && (
               <button
                 onClick={() => {
-                  if (page * PAGE < historyEvents.length) setPage(p => p + 1)
+                  if (page * PAGE < filtered.length) setPage(p => p + 1)
                   else onLoadMore?.()
                 }}
-                className="mt-3 w-full rounded-xl py-2 border border-[var(--border)] text-xs text-[var(--muted)] hover:text-[var(--ink)] hover:border-[var(--ink-2)] transition"
+                className="mt-3 w-full rounded-xl py-2 border border-[var(--border)] text-xs text-[var(--muted)] hover:text-[var(--ink)] hover:border-[var(--border-strong)] transition"
               >
                 Load more
               </button>

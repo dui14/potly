@@ -8,7 +8,6 @@ import { usePot, STATUS } from '@/hooks/usePot'
 import { StatusBadge } from '@/components/StatusBadge'
 import { ProgressBar } from '@/components/ProgressBar'
 import { TARGET_CHAIN_ID } from '@/config/wagmi'
-import { usePotMeta } from '@/hooks/usePotMeta'
 import { useChainTime } from '@/hooks/useChainTime'
 
 type Tab = 'all' | 'open' | 'paid' | 'closed'
@@ -30,7 +29,7 @@ export function MyPotsPage() {
     try { return s ? BigInt(s) : undefined } catch { return undefined }
   })()
 
-  const { pots, loading, loadingMore, hasMore, error, progress, retry, loadMore } = useMyPots(address, newPotId)
+  const { pots, loading, loadingMore, hasMore, error, retry, loadMore } = useMyPots(address, newPotId)
   const [tab, setTab] = useState<Tab>('all')
 
   if (!address) {
@@ -70,11 +69,6 @@ export function MyPotsPage() {
       {loading && (
         <div className="flex flex-col items-center gap-3 py-12 text-[var(--muted)]">
           <Loader2 size={24} className="animate-spin" />
-          {progress && (
-            <p className="text-xs tabular-nums">
-              Loading {progress.done}/{progress.total} pots…
-            </p>
-          )}
           {/* Skeleton cards */}
           <div className="pots-grid w-full">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -106,8 +100,8 @@ export function MyPotsPage() {
       {!loading && pots.length > 0 && (
         <>
           <div className="pots-grid">
-            {pots.map(({ potId, role }) => (
-              <PotCard key={potId.toString()} potId={potId} role={role} tab={tab} />
+            {pots.map(({ potId, role, title }) => (
+              <PotCard key={potId.toString()} potId={potId} role={role} tab={tab} titleFromHook={title} />
             ))}
           </div>
           {hasMore && (
@@ -127,12 +121,12 @@ export function MyPotsPage() {
   )
 }
 
-interface CardProps { potId: bigint; role: string; tab: Tab }
+interface CardProps { potId: bigint; role: string; tab: Tab; titleFromHook?: string }
 
-function PotCard({ potId, role, tab }: CardProps) {
+function PotCard({ potId, role, tab, titleFromHook }: CardProps) {
   const { pot } = usePot(potId)
-  const { title } = usePotMeta(TARGET_CHAIN_ID, potId)
   const chainTime = useChainTime()
+  const title = titleFromHook ?? `Pot #${potId}`
 
   // Tab filtering
   if (pot) {

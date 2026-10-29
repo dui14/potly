@@ -10,15 +10,18 @@ import { formatAddress } from '@/lib/utils'
 import { formatDateTime } from '@/lib/fmt'
 import type { PotData } from '@/hooks/usePot'
 import type { PotEvent } from '@/hooks/useActivity'
-import { useCreatedAt } from '@/hooks/useCreatedAt'
 
 interface Props {
-  pot: PotData
-  potId: bigint
-  events: PotEvent[]
-  aliases: Record<string, string>
-  chainTime: bigint
-  onRefresh?: () => void
+  pot:                PotData
+  potId:              bigint
+  events:             PotEvent[]
+  aliases:            Record<string, string>
+  chainTime:          bigint
+  onRefresh?:         () => void
+  /** Created event from the history API — already queried from DB. */
+  createdFromHistory?: { time: string; txHash: string } | null
+  /** True while the history GET is in flight (show skeleton for Created). */
+  loading?:           boolean
 }
 
 /**
@@ -43,10 +46,8 @@ const DOT = 'w-2 h-2 rounded-full bg-[var(--accent)] mt-1 shrink-0'
 const DONE_DOT = 'w-2 h-2 rounded-full bg-[var(--success)] mt-1 shrink-0'
 const FADE_DOT = 'w-2 h-2 rounded-full bg-[var(--subtle)] mt-1 shrink-0'
 
-export function StatusTimeline({ pot, potId, events, aliases, chainTime, onRefresh: _onRefresh }: Props) {
+export function StatusTimeline({ pot, potId: _potId, events, aliases, chainTime, onRefresh: _onRefresh, createdFromHistory, loading }: Props) {
   const createdEvt  = events.find(e => e.kind === 'created')
-  // Pass the DB ISO time so useCreatedAt can skip the RPC call when DB has it.
-  const chainCreatedAt = useCreatedAt(potId, createdEvt?.block_time ?? null)
   const filledEvt   = events.find(e => e.kind === 'filled')
   const payoutEvt   = events.find(e => e.kind === 'payout')
   const cancelEvt   = events.find(e => e.kind === 'cancelled')
@@ -59,21 +60,21 @@ export function StatusTimeline({ pot, potId, events, aliases, chainTime, onRefre
 
   const steps: React.ReactNode[] = []
 
-  // Created: prefer DB event (has tx_hash) → chain getLogs result → "—"
-  // Never show "Syncing…" — chain data is always available.
-  const createdTime = createdEvt
-    ? fmtTs(createdEvt.block_time)
-    : chainCreatedAt
-      ? fmtTs(chainCreatedAt)
-      : '—'
+  // Created: DB event → createdFromHistory (history API) → skeleton → "—"
+  const createdSource = createdEvt
+    ? { time: fmtTs(createdEvt.block_time), txHash: createdEvt.tx_hash }
+    : createdFromHistory ?? null
+  const createdTime = loading && !createdSource ? null : (createdSource?.time ?? '—')
   steps.push(
     <Step key="created" dot={<span className={DONE_DOT} />}
       label="Created"
-      time={createdTime}
+      time={createdTime === null ? '' : createdTime}
       sub={
-        createdEvt
-          ? <a href={buildTxUrl(createdEvt.tx_hash)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[var(--muted)] hover:text-[var(--ink)] text-xs">tx <ExternalLink size={10} /></a>
-          : null
+        createdTime === null
+          ? <span className="skeleton h-3 w-28 mt-1 inline-block" />
+          : createdSource?.txHash
+            ? <a href={buildTxUrl(createdSource.txHash)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[var(--muted)] hover:text-[var(--ink)] text-xs">tx <ExternalLink size={10} /></a>
+            : null
       }
     />,
   )

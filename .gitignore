@@ -19,11 +19,13 @@ dist/
 contracts/out/
 contracts/cache/
 
-# Editor / OS
+# Editor / OS / local agent
 .DS_Store
 Thumbs.db
 .vscode/
+.cursor/
 .idea/
+AGENTS.md
 *.swp
 *.swo
 *.sql
